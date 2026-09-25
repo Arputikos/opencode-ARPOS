@@ -31,7 +31,7 @@ export namespace SessionCompaction {
   }
 
   /**
-   * Patched (agentos): the synthetic "carry on" prompt injected after an
+   * Patched (arpos): the synthetic "carry on" prompt injected after an
    * automatic compaction.
    *
    * The overflow variant used to assert, unconditionally, that the request

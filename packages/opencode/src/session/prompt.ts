@@ -63,7 +63,7 @@ IMPORTANT:
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
 
 /**
- * Patched (agentos): what the Agent OS orchestrator says about a submitted
+ * Patched (arpos): what the ARPOS orchestrator says about a submitted
  * structured answer. `text` is written for the MODEL to read, not for a log.
  */
 export interface StructuredSubmitResult {
@@ -72,11 +72,11 @@ export interface StructuredSubmitResult {
 }
 
 /**
- * Patched (agentos): hand the model's structured answer to the orchestrator and
+ * Patched (arpos): hand the model's structured answer to the orchestrator and
  * return its verdict.
  *
  * The orchestrator owns the schema, the validation, the corrective-retry budget
- * and the transcript stamp for BOTH Agent OS engines, so this fork only relays.
+ * and the transcript stamp for BOTH ARPOS engines, so this fork only relays.
  * It is the same endpoint the Claude Code MCP tool posts to, which is what makes
  * one `output_schema` behave identically on either engine.
  *
@@ -86,13 +86,13 @@ export interface StructuredSubmitResult {
  * exactly the quiet degradation this design removes.
  */
 async function reportStructuredOutput(sessionID: string, args: unknown): Promise<StructuredSubmitResult> {
-  const baseUrl = process.env["AGENT_OS_ORCHESTRATOR_URL"]
-  const apiKey = process.env["AGENT_OS_ORCHESTRATOR_API_KEY"]
+  const baseUrl = process.env["ARPOS_ORCHESTRATOR_URL"]
+  const apiKey = process.env["ARPOS_ORCHESTRATOR_API_KEY"]
   if (!baseUrl || !apiKey) {
     return {
       accepted: false,
       text:
-        "Structured output could not be delivered: this OpenCode server is not connected to an Agent OS " +
+        "Structured output could not be delivered: this OpenCode server is not connected to an ARPOS " +
         "orchestrator, so the answer cannot be validated. Stop calling StructuredOutput and end your turn.",
     }
   }
@@ -127,7 +127,7 @@ export namespace SessionPrompt {
   const elog = EffectLogger.create({ service: "session.prompt" })
 
   /**
-   * Patched (agentos): how many provider "request too large" rejections in a row
+   * Patched (arpos): how many provider "request too large" rejections in a row
    * may be answered with a compaction before the turn gives up.
    *
    * 1 would be wrong — a single rejection followed by one compaction is normal
@@ -140,7 +140,7 @@ export namespace SessionPrompt {
   const COMPACTION_REJECT_LIMIT = 2
 
   /**
-   * Patched (agentos): advance the overflow-compaction circuit breaker.
+   * Patched (arpos): advance the overflow-compaction circuit breaker.
    *
    * `rejected` is true when the provider refused the request as too large
    * (`ContextOverflowError`), false when our own token accounting decided a
@@ -161,7 +161,7 @@ export namespace SessionPrompt {
   }
 
   /**
-   * Patched (agentos): should a queued compaction be dropped instead of run?
+   * Patched (arpos): should a queued compaction be dropped instead of run?
    *
    * A compaction queued with `overflow: true` carries a verdict that belongs to
    * ONE model: this provider refused THIS request as too large. The verdict is
@@ -187,7 +187,7 @@ export namespace SessionPrompt {
   }
 
   /**
-   * Patched (agentos): does this message CARRY an overflow compaction request
+   * Patched (arpos): does this message CARRY an overflow compaction request
    * that was queued under a different model?
    *
    * `compaction.create()` records the request as a message of its OWN: a
@@ -243,7 +243,7 @@ export namespace SessionPrompt {
   }
 
   /**
-   * Patched (agentos): the carriers this turn must pretend were never queued.
+   * Patched (arpos): the carriers this turn must pretend were never queued.
    *
    * A carrier whose compaction ALREADY RAN is untouchable, and that is not a
    * detail. `MessageV2.filterCompacted` cuts the history AT such a carrier and
@@ -297,7 +297,7 @@ export namespace SessionPrompt {
   }
 
   /**
-   * Patched (agentos): read the turn's shape off the message list.
+   * Patched (arpos): read the turn's shape off the message list.
    *
    * Lifted out of `runLoop` because it has to run TWICE in one iteration — once
    * over the stored history, and again after a stale overflow compaction carrier
@@ -659,7 +659,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   metadata: val.metadata,
                   status: "running",
                   input: args,
-                  // Agent OS: never re-stamped on a metadata update — bash streams its
+                  // ARPOS: never re-stamped on a metadata update — bash streams its
                   // output through here, and each update used to move the start forward.
                   time: {
                     start:
@@ -1605,7 +1605,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
        * recent assistant message and re-executes each one with the original
        * stored input. The execution uses the normal Tool.Context pipeline
        * (same permission.ask path) — a fresh permission.asked fires with a
-       * new permissionId, downstream consumers (AgentOS orchestrator) handle
+       * new permissionId, downstream consumers (ARPOS orchestrator) handle
        * it with their standard re-attach/auto-approve logic, the tool runs
        * for real, and the final output is patched back onto the SAME part
        * (same id/messageID/callID) so the conversation history stays coherent.
@@ -1629,7 +1629,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const lastUser = lastUserMsg.info
         const agent = yield* agents.get(lastUser.agent)
         if (!agent) return
-        // AgentOS fork patch: prefer the CURRENT model (agent's own, else the
+        // ARPOS fork patch: prefer the CURRENT model (agent's own, else the
         // global default = opencode.json top-level `model`) over the stale model
         // pinned on the user message (see the matching note in the main loop) so an
         // orphan-tool resume after a mid-session model edit runs on the new model.
@@ -1803,7 +1803,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         function* (sessionID: SessionID) {
           const ctx = yield* InstanceState.context
           const slog = elog.with({ sessionID })
-          // Patched (agentos): the orchestrator ACCEPTED a structured answer for
+          // Patched (arpos): the orchestrator ACCEPTED a structured answer for
           // this turn, so the loop may stop. It is the only thing the fork still
           // does with the verdict — validation, the retry budget and the failure
           // are all the orchestrator's (see `createStructuredOutputTool`). The
@@ -1812,13 +1812,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           // keep calling the tool after the answer was already delivered.
           let structuredAccepted = false
           let step = 0
-          // Patched (agentos): consecutive compactions triggered by the provider
+          // Patched (arpos): consecutive compactions triggered by the provider
           // REFUSING the request as too large. Reset by any step the provider
           // actually accepted. See COMPACTION_REJECT_LIMIT below.
           let overflowCompactions = 0
           const session = yield* sessions.get(sessionID)
 
-          // Patched (agentos/v1.4.6.3): re-drive any orphaned tool parts whose
+          // Patched (arpos/v1.4.6.3): re-drive any orphaned tool parts whose
           // permission was in-flight when the server went down. See
           // resumeOrphanTools above. This runs once before the normal loop so
           // the LLM reads a clean "tool-call → tool-result" history on step 0.
@@ -1832,16 +1832,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             let msgs = yield* MessageV2.filterCompactedEffect(sessionID)
 
-            // Patched (agentos): the scan lives in `scanTurn` because the stale
+            // Patched (arpos): the scan lives in `scanTurn` because the stale
             // overflow gate below may have to re-run it on a shorter list.
             let { lastUser, lastAssistant, lastFinished, lastUserIdx, lastAssistantIdx, lastFinishedIdx, tasks } =
               scanTurn(msgs)
 
             if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
 
-            // AgentOS fork patch: the model is pinned onto the user message when it is
+            // ARPOS fork patch: the model is pinned onto the user message when it is
             // created (`createUserMessage` → `ag.model`). If the agent's configured model
-            // changed afterwards (e.g. the user edited it in AgentOS settings mid-session),
+            // changed afterwards (e.g. the user edited it in ARPOS settings mid-session),
             // resuming/continuing this turn would otherwise re-run on the STALE pinned model
             // — even though the freshly-spawned server's config carries the new one —
             // surfacing as "Model not found: <old model>" on every retry. Re-bind to the
@@ -1853,15 +1853,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             const liveAgent = yield* agents.get(lastUser.agent)
             // The model this turn SHOULD run on: the agent's own model if it has
             // one, else the global default — `config.model`, i.e. opencode.json's
-            // top-level `model`, which AgentOS rewrites to the current model on
+            // top-level `model`, which ARPOS rewrites to the current model on
             // every spawn. Deliberately NOT `lastModel`: that returns the STALE
             // pinned model of the last user message, which is exactly what we are
-            // overriding. (AgentOS configs set the model globally, not per-agent —
+            // overriding. (ARPOS configs set the model globally, not per-agent —
             // `agent: {}` is empty — so `liveAgent.model` is undefined and the
             // defaultModel branch is the one that actually fires.)
             const target = liveAgent?.model ?? (yield* provider.defaultModel())
 
-            // Patched (agentos): drop a compaction that was queued under a model
+            // Patched (arpos): drop a compaction that was queued under a model
             // which is no longer the one running — carrier message and all.
             //
             // This runs BEFORE the rebind, while every message still carries the
@@ -2092,7 +2092,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 toolChoice: format.type === "json_schema" ? "required" : undefined,
               })
 
-              // Patched (agentos): the orchestrator accepted the structured
+              // Patched (arpos): the orchestrator accepted the structured
               // answer, so this turn is done. Nothing is written onto the
               // message here — the orchestrator stamps the validated object (and
               // any StructuredOutputError) onto the transcript itself, so a
@@ -2108,7 +2108,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
               if (result === "stop") return "break" as const
               if (result === "compact") {
-                // Patched (agentos): stop the compaction doom loop.
+                // Patched (arpos): stop the compaction doom loop.
                 //
                 // `"compact"` means one of two very different things. Either our
                 // own token accounting decided a compaction is due (routine — the
@@ -2455,10 +2455,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
   export type CommandInput = z.infer<typeof CommandInput>
 
   /**
-   * Patched (agentos): the structured-output tool is a PASS-THROUGH.
+   * Patched (arpos): the structured-output tool is a PASS-THROUGH.
    *
    * Upstream validated the model's argument here and counted the corrective
-   * retries in the run loop. Both now live in the Agent OS orchestrator, which
+   * retries in the run loop. Both now live in the ARPOS orchestrator, which
    * is the single authority for structured output across both of its engines —
    * so an `output_schema` behaves identically whether the session runs on
    * OpenCode or on Claude Code (which reaches the same endpoint through an MCP

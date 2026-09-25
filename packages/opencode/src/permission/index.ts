@@ -88,7 +88,7 @@ export namespace Permission {
   export class CorrectedError extends Schema.TaggedErrorClass<CorrectedError>()("PermissionCorrectedError", {
     feedback: Schema.String,
   }) {
-    // Agent OS: the feedback IS the message, verbatim. The orchestrator is the
+    // ARPOS: the feedback IS the message, verbatim. The orchestrator is the
     // only one replying with a message, and it words every refusal itself
     // (operator refusal, always-deny rule, gate failure) — the same text the
     // Claude Code engine hands the model. The upstream frame ("The user rejected
@@ -223,7 +223,7 @@ export namespace Permission {
             input.message ? new CorrectedError({ feedback: input.message }) : new RejectedError(),
           )
 
-          // Agent OS: a refusal WITH a message is aimed at this one call — the
+          // ARPOS: a refusal WITH a message is aimed at this one call — the
           // orchestrator sends one per decision (an operator refusing one of
           // several parallel calls, an always-deny rule firing next to a call
           // still waiting for a human). Cascading it rejected calls nobody had

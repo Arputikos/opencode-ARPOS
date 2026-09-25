@@ -157,8 +157,8 @@ describe("structured-output.AssistantMessage", () => {
 })
 
 describe("structured-output.createStructuredOutputTool", () => {
-  // Patched (agentos): the tool is a PASS-THROUGH. Validation, the corrective
-  // retry budget and the failure all live in the Agent OS orchestrator, so the
+  // Patched (arpos): the tool is a PASS-THROUGH. Validation, the corrective
+  // retry budget and the failure all live in the ARPOS orchestrator, so the
   // fork is only responsible for two things — showing the model the caller's
   // real JSON Schema, and relaying the orchestrator's verdict back. The
   // validation behaviour these tests used to assert is covered by the

@@ -1371,7 +1371,7 @@ unix(
   30_000,
 )
 
-// Agent OS: a tool call's `time.start` is when the tool began EXECUTING. It used
+// ARPOS: a tool call's `time.start` is when the tool began EXECUTING. It used
 // to be stamped when the processor got round to the stream's `tool-call` event
 // and again on every `ctx.metadata` update — bash streams its output through
 // metadata — so a 1 s call finished "0 ms" after it started.

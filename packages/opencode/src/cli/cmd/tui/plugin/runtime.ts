@@ -935,7 +935,7 @@ async function installPluginBySpec(
 // register this plugin. Registering here (before load() pulls in external TUI
 // plugins) is in time for plugin resolution; host @opentui modules already
 // resolve normally via node_modules in dev and are bundled in the compiled
-// binary, so they don't depend on this. See AgentOS
+// binary, so they don't depend on this. See ARPOS
 // docs/tickets/47-BUG-opentui-serve-crash-loop/.
 let runtimePluginSupportLoaded: Promise<unknown> | undefined
 function ensureRuntimePluginSupport(): Promise<unknown> {

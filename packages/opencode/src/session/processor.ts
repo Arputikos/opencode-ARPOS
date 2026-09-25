@@ -58,7 +58,7 @@ export namespace SessionProcessor {
       },
     ) => Effect.Effect<void>
     /**
-     * Agent OS: the tool's `execute` has begun — THIS is the call's `time.start`.
+     * ARPOS: the tool's `execute` has begun — THIS is the call's `time.start`.
      * The stream's `tool-call` event can reach the processor only after the tool
      * already ran, so stamping start there (or on each `ctx.metadata` update, which
      * bash uses to stream its output) measured a 1 s call as a few milliseconds.
@@ -88,7 +88,7 @@ export namespace SessionProcessor {
 
   interface ProcessorContext extends Input {
     toolcalls: Record<string, ToolCall>
-    /** Agent OS: when each tool call's `execute` began (epoch ms) — see `startToolCall`. */
+    /** ARPOS: when each tool call's `execute` began (epoch ms) — see `startToolCall`. */
     toolStarts: Record<string, number>
     shouldBreak: boolean
     snapshot: string | undefined

@@ -42,8 +42,8 @@ export const AttachCommand = cmd({
     // Lazy-load the TUI graph (app.tsx → @opentui/core native + @opentui/solid +
     // solid-js + ~40 .tsx components) only when the TUI actually launches. A
     // top-level import would pull ~375 MB RSS into EVERY command — including the
-    // headless `opencode serve` that AgentOS runs — via index.ts's static import
-    // of this command module. See AgentOS docs/tickets/51-FEATURE-serve-skip-tui-graph/.
+    // headless `opencode serve` that ARPOS runs — via index.ts's static import
+    // of this command module. See ARPOS docs/tickets/51-FEATURE-serve-skip-tui-graph/.
     const { tui } = await import("./app")
     const unguard = win32InstallCtrlCGuard()
     try {

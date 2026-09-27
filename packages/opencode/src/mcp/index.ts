@@ -129,8 +129,20 @@ export namespace MCP {
 
   const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "_")
 
+  // Patched (arpos): the server each converted tool came from. The tool key
+  // (`<server>_<tool>`, both sanitized) cannot be split back — server names
+  // contain `_` and `-` as freely as tool names do — so the origin is recorded
+  // when the tool is built. A WeakMap because `tools()` rebuilds every tool on
+  // every call; the entries go away with the tools.
+  const toolServers = new WeakMap<Tool, string>()
+
+  /** Patched (arpos): the MCP server a tool from `tools()` belongs to; undefined for any other tool. */
+  export function serverOf(tool: Tool): string | undefined {
+    return toolServers.get(tool)
+  }
+
   // Convert MCP tool definition to AI SDK Tool type
-  function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number): Tool {
+  function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, clientName: string, timeout?: number): Tool {
     const inputSchema = mcpTool.inputSchema
 
     // Spread first, then override type to ensure it's always "object"
@@ -141,7 +153,7 @@ export namespace MCP {
       additionalProperties: false,
     }
 
-    return dynamicTool({
+    const converted = dynamicTool({
       description: mcpTool.description ?? "",
       inputSchema: jsonSchema(schema),
       execute: async (args: unknown) => {
@@ -158,6 +170,8 @@ export namespace MCP {
         )
       },
     })
+    toolServers.set(converted, clientName)
+    return converted
   }
 
   function defs(key: string, client: MCPClient, timeout?: number) {
@@ -411,7 +425,9 @@ export namespace MCP {
           })),
           Effect.catch((error): Effect.Effect<{ client: MCPClient | undefined; status: Status }> => {
             const msg = error instanceof Error ? error.message : String(error)
-            log.error("local mcp startup failed", { key, command: mcp.command, cwd, error: msg })
+            // Program name only: ARPOS may expand a secret into the arguments
+            // (`--api-key ${API_KEY}`), and this log line outlives the process.
+            log.error("local mcp startup failed", { key, command: cmd, cwd, error: msg })
             return Effect.succeed({ client: undefined, status: { status: "failed", error: msg } })
           }),
         )
@@ -656,7 +672,12 @@ export namespace MCP {
 
               const timeout = entry?.timeout ?? defaultTimeout
               for (const mcpTool of listed) {
-                result[sanitize(clientName) + "_" + sanitize(mcpTool.name)] = convertMcpTool(mcpTool, client, timeout)
+                result[sanitize(clientName) + "_" + sanitize(mcpTool.name)] = convertMcpTool(
+                  mcpTool,
+                  client,
+                  clientName,
+                  timeout,
+                )
               }
             }),
           { concurrency: "unbounded" },

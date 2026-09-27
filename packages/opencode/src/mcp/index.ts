@@ -425,7 +425,9 @@ export namespace MCP {
           })),
           Effect.catch((error): Effect.Effect<{ client: MCPClient | undefined; status: Status }> => {
             const msg = error instanceof Error ? error.message : String(error)
-            log.error("local mcp startup failed", { key, command: mcp.command, cwd, error: msg })
+            // Program name only: Agent OS may expand a secret into the arguments
+            // (`--api-key ${API_KEY}`), and this log line outlives the process.
+            log.error("local mcp startup failed", { key, command: cmd, cwd, error: msg })
             return Effect.succeed({ client: undefined, status: { status: "failed", error: msg } })
           }),
         )

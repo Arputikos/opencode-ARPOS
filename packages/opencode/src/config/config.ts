@@ -1458,7 +1458,7 @@ export namespace Config {
           yield* track(dir, list)
         }
 
-        // Agent OS shared-server: per-instance config dir merged as a local source
+        // ARPOS shared-server: per-instance config dir merged as a local source
         // so each instance (session) carries its own MCP set (e.g. per-session
         // Playwright --user-data-dir) while sharing the desk `directory`. Keyed per
         // instance via the InstanceState cache, so two sessions of one agent in a

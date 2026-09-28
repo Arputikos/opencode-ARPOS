@@ -474,7 +474,7 @@ export namespace MCP {
       // Windows tree-kill: descendants() returns [] on win32 (pgrep is POSIX),
       // so the SIGTERM-children path never reaches the MCP server's grandchildren
       // (e.g. the Playwright browser). taskkill /T force-kills the whole process
-      // tree rooted at pid. Patches the Agent OS shared-server dispose so an
+      // tree rooted at pid. Patches the ARPOS shared-server dispose so an
       // instance teardown actually frees its browser on Windows.
       const killTree = Effect.fnUntraced(function* (pid: number) {
         if (process.platform !== "win32") return

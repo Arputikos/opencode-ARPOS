@@ -58,7 +58,7 @@ export function WorkspaceRouterMiddleware(upgrade: UpgradeWebSocket): Middleware
       })(),
     )
 
-    // Agent OS shared-server: decouple instance identity from the desk `directory`
+    // ARPOS shared-server: decouple instance identity from the desk `directory`
     // so multiple sessions of the same agent (same desk) get isolated instances
     // (MCP/LSP/config). Optional — absent headers fall back to upstream behavior
     // (instance keyed by directory).

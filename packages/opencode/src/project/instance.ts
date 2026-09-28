@@ -10,7 +10,7 @@ import { WorkspaceContext } from "@/control-plane/workspace-context"
 
 export interface InstanceContext {
   // Cache/scope key for this instance. Defaults to the resolved `directory`
-  // (upstream behavior). When an explicit instance id is supplied (Agent OS
+  // (upstream behavior). When an explicit instance id is supplied (ARPOS
   // shared-server: many sessions of one agent share a desk `directory` but need
   // separate MCP/LSP/config scopes), `key` decouples the instance identity from
   // the cwd so they do not collapse into a single instance.

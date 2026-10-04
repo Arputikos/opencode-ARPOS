@@ -50,7 +50,8 @@ export namespace RequestFootprint {
   /** Why the footprint is being reported — each reads as a different first sentence. */
   export type Reason =
     | { type: "too-large" }
-    | { type: "empty"; finish?: string }
+    /** `structured`: the step had to answer in the caller's output schema. */
+    | { type: "empty"; finish?: string; structured?: boolean }
     | { type: "no-room"; threshold: number }
     /** Refused as too large — by the provider, or by the pre-flight check — after a compaction. */
     | { type: "rejected"; times: number }
@@ -164,6 +165,17 @@ export namespace RequestFootprint {
         sentences.push(`Request too large for ${info.model}: ${size}, but ${limit}.`)
         break
       case "empty":
+        // Nothing back, no input counted, and the answer had to match the
+        // caller's schema: the provider refused the schema itself (it decodes
+        // under it), which no model or tool change fixes — the size advice
+        // below would only send the caller the wrong way.
+        if (reason.structured && !info.measured) {
+          return (
+            `${info.model} returned no content (finish: ${reason.finish ?? "none"}) and reported no input tokens ` +
+            `while it had to answer in the requested output schema — the provider most likely cannot produce an ` +
+            `answer matching that schema (contradictory or unsupported constraints). Check the output schema.`
+          )
+        }
         sentences.push(
           `${info.model} returned no content (finish: ${reason.finish ?? "none"}). The request was ${size}; ${limit}.`,
         )

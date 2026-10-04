@@ -163,15 +163,15 @@ describe("structured-output.createStructuredOutputTool", () => {
   // real JSON Schema, and relaying the orchestrator's verdict back. The
   // validation behaviour these tests used to assert is covered by the
   // orchestrator's own suite (`core/__tests__/structured-output.test.ts`).
-  const accept = async () => ({ accepted: true, text: "Structured output captured successfully." })
-  const reject = async () => ({ accepted: false, text: "did NOT match the required schema" })
+  const accept = async () => ({ accepted: true, terminal: false, text: "Structured output captured successfully." })
+  const reject = async () => ({ accepted: false, terminal: false, text: "did NOT match the required schema" })
   const callOpts = { toolCallId: "test-call-id", messages: [], abortSignal: undefined as any }
 
   test("creates tool with correct id", () => {
     const tool = SessionPrompt.createStructuredOutputTool({
       schema: { type: "object", properties: { name: { type: "string" } } },
       submit: accept,
-      onAccepted: () => {},
+      onTurnOver: () => {},
     })
 
     // AI SDK tool type doesn't expose id, but we set it internally
@@ -182,7 +182,7 @@ describe("structured-output.createStructuredOutputTool", () => {
     const tool = SessionPrompt.createStructuredOutputTool({
       schema: { type: "object" },
       submit: accept,
-      onAccepted: () => {},
+      onTurnOver: () => {},
     })
 
     expect(tool.description).toContain("structured format")
@@ -203,7 +203,7 @@ describe("structured-output.createStructuredOutputTool", () => {
     const tool = SessionPrompt.createStructuredOutputTool({
       schema,
       submit: accept,
-      onAccepted: () => {},
+      onTurnOver: () => {},
     })
 
     // This is the one thing only the fork can do: the pass-through `jsonSchema()`
@@ -224,7 +224,7 @@ describe("structured-output.createStructuredOutputTool", () => {
         properties: { name: { type: "string" } },
       },
       submit: accept,
-      onAccepted: () => {},
+      onTurnOver: () => {},
     })
 
     const inputSchema = tool.inputSchema as any
@@ -239,9 +239,9 @@ describe("structured-output.createStructuredOutputTool", () => {
       schema: { type: "object", properties: { name: { type: "string" } } },
       submit: async (args) => {
         submitted = args
-        return { accepted: true, text: "Structured output captured successfully." }
+        return { accepted: true, terminal: false, text: "Structured output captured successfully." }
       },
-      onAccepted: () => {
+      onTurnOver: () => {
         accepted = true
       },
     })
@@ -261,25 +261,44 @@ describe("structured-output.createStructuredOutputTool", () => {
     const tool = SessionPrompt.createStructuredOutputTool({
       schema: { type: "object", required: ["sentiment"] },
       submit: reject,
-      onAccepted: () => {
+      onTurnOver: () => {
         accepted = true
       },
     })
 
     const result = await tool.execute!({ sentiment: "banana" }, callOpts)
 
-    // `onAccepted` is what breaks the run loop — a rejection must leave the
-    // model free to correct itself on the next step.
+    // `onTurnOver` is what breaks the run loop — a rejection with budget left
+    // must leave the model free to correct itself on the next step.
     expect(accepted).toBe(false)
     expect(result.metadata.valid).toBe(false)
     expect(result.output).toContain("did NOT match the required schema")
+  })
+
+  test("a TERMINAL refusal ends the turn — under toolChoice: required the model could not stop on its own", async () => {
+    let over = false
+
+    const tool = SessionPrompt.createStructuredOutputTool({
+      schema: { type: "object", required: ["sentiment"] },
+      submit: async () => ({ accepted: false, terminal: true, text: "no corrective attempts left" }),
+      onTurnOver: () => {
+        over = true
+      },
+    })
+
+    const result = await tool.execute!({ sentiment: "banana" }, callOpts)
+
+    expect(over).toBe(true)
+    // Still a refusal: the orchestrator's gate fails the turn, nothing here accepts it.
+    expect(result.metadata.valid).toBe(false)
+    expect(result.output).toContain("no corrective attempts left")
   })
 
   test("toModelOutput returns text value", async () => {
     const tool = SessionPrompt.createStructuredOutputTool({
       schema: { type: "object" },
       submit: accept,
-      onAccepted: () => {},
+      onTurnOver: () => {},
     })
 
     expect(tool.toModelOutput).toBeDefined()

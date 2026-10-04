@@ -239,6 +239,25 @@ describe("RequestFootprint", () => {
       expect(text).toContain("Large tool sets can make a model fail even below its input limit.")
     })
 
+    test("empty structured turn the provider never read: blames the schema, not the size", () => {
+      const text = RequestFootprint.format(
+        { ...fp, model: "openai/gpt-6-luna" },
+        { type: "empty", finish: "length", structured: true },
+      )
+      expect(text).toStartWith("openai/gpt-6-luna returned no content (finish: length) and reported no input tokens")
+      expect(text).toEndWith("Check the output schema.")
+      expect(text).not.toContain("larger input limit")
+    })
+
+    test("empty structured turn with input counted: still the size report", () => {
+      const text = RequestFootprint.format(
+        { ...fp, measured: true },
+        { type: "empty", finish: "length", structured: true },
+      )
+      expect(text).toContain("The request was 325,500 input tokens;")
+      expect(text).not.toContain("output schema")
+    })
+
     test("no room: names the fixed overhead and the threshold", () => {
       expect(RequestFootprint.format(fp, { type: "no-room", threshold: 252_000 })).toStartWith(
         "Compacting the conversation cannot make room on openai/gpt-5.6-terra: the system prompt and tools alone " +

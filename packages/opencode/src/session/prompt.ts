@@ -66,9 +66,13 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 /**
  * Patched (arpos): what the ARPOS orchestrator says about a submitted
  * structured answer. `text` is written for the MODEL to read, not for a log.
+ * `terminal`: no further submission can change the outcome (the corrective
+ * budget is spent, the tool is capped, nothing validates answers here) — the
+ * turn must end, and the orchestrator decides how it ended.
  */
 export interface StructuredSubmitResult {
   accepted: boolean
+  terminal: boolean
   text: string
 }
 
@@ -92,6 +96,7 @@ async function reportStructuredOutput(sessionID: string, args: unknown): Promise
   if (!baseUrl || !apiKey) {
     return {
       accepted: false,
+      terminal: true,
       text:
         "Structured output could not be delivered: this OpenCode server is not connected to an ARPOS " +
         "orchestrator, so the answer cannot be validated. Stop calling StructuredOutput and end your turn.",
@@ -105,19 +110,30 @@ async function reportStructuredOutput(sessionID: string, args: unknown): Promise
       signal: AbortSignal.timeout(60_000),
     })
     if (!resp.ok) {
+      // A 4xx will not change on a retry (unknown session, refused token);
+      // a 5xx may.
+      const terminal = resp.status < 500
       return {
         accepted: false,
-        text: `Structured output could not be validated (orchestrator returned ${resp.status}). Try calling StructuredOutput again.`,
+        terminal,
+        text: terminal
+          ? `Structured output could not be validated (orchestrator returned ${resp.status}). Stop calling StructuredOutput and end your turn.`
+          : `Structured output could not be validated (orchestrator returned ${resp.status}). Try calling StructuredOutput again.`,
       }
     }
-    const result = (await resp.json()) as { ok?: unknown; text?: unknown }
+    const result = (await resp.json()) as { ok?: unknown; terminal?: unknown; text?: unknown }
     if (typeof result.text !== "string") {
-      return { accepted: false, text: "Structured output could not be validated: malformed orchestrator response." }
+      return {
+        accepted: false,
+        terminal: false,
+        text: "Structured output could not be validated: malformed orchestrator response.",
+      }
     }
-    return { accepted: result.ok === true, text: result.text }
+    return { accepted: result.ok === true, terminal: result.terminal === true, text: result.text }
   } catch (e) {
     return {
       accepted: false,
+      terminal: false,
       text: `Structured output could not be delivered to the orchestrator: ${e instanceof Error ? e.message : String(e)}. Try calling StructuredOutput again.`,
     }
   }
@@ -1839,14 +1855,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         function* (sessionID: SessionID) {
           const ctx = yield* InstanceState.context
           const slog = elog.with({ sessionID })
-          // Patched (arpos): the orchestrator ACCEPTED a structured answer for
-          // this turn, so the loop may stop. It is the only thing the fork still
+          // Patched (arpos): the orchestrator's verdict ended this turn's
+          // structured answer — accepted, or terminally refused (budget spent,
+          // tool capped). Stopping the loop is the only thing the fork still
           // does with the verdict — validation, the retry budget and the failure
           // are all the orchestrator's (see `createStructuredOutputTool`). The
           // loop has to stop on its own, though: `toolChoice: "required"` makes
           // the model call SOMETHING on every step, so without a break it would
-          // keep calling the tool after the answer was already delivered.
-          let structuredAccepted = false
+          // keep calling the tool after the answer was delivered — or, after a
+          // terminal refusal, forever.
+          let structuredDone = false
           let step = 0
           // Patched (arpos): compactions started in a row, with no request in
           // between that fit. See COMPACTION_STREAK_LIMIT.
@@ -2137,8 +2155,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 tools["StructuredOutput"] = createStructuredOutputTool({
                   schema: lastUser.format.schema,
                   submit: (args) => reportStructuredOutput(sessionID, args),
-                  onAccepted() {
-                    structuredAccepted = true
+                  onTurnOver() {
+                    structuredDone = true
                   },
                 })
               }
@@ -2234,15 +2252,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 toolChoice: format.type === "json_schema" ? "required" : undefined,
               })
 
-              // Patched (arpos): the orchestrator accepted the structured
-              // answer, so this turn is done. Nothing is written onto the
-              // message here — the orchestrator stamps the validated object (and
-              // any StructuredOutputError) onto the transcript itself, so a
-              // Claude Code session and an OpenCode session end up carrying
-              // exactly the same fields. Ending the loop IS the fork's job,
-              // though: `toolChoice: "required"` would otherwise keep the model
-              // calling tools after it had already answered.
-              if (structuredAccepted) {
+              // Patched (arpos): the structured answer is settled — accepted, or
+              // refused for good — so this turn is done. Nothing is written onto
+              // the message here — the orchestrator's end-of-turn gate stamps the
+              // validated object (or fails the turn with a StructuredOutputError)
+              // itself, so a Claude Code session and an OpenCode session end up
+              // carrying exactly the same fields. Ending the loop IS the fork's
+              // job, though: `toolChoice: "required"` would otherwise keep the
+              // model calling tools.
+              if (structuredDone) {
                 handle.message.finish = handle.message.finish ?? "stop"
                 yield* sessions.updateMessage(handle.message)
                 return "break" as const
@@ -2259,6 +2277,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 yield* failTurn(handle.message, RequestFootprint.withMeasuredInput(footprint, handle.message.tokens), {
                   type: "empty",
                   finish: handle.message.finish,
+                  structured: format.type === "json_schema",
                 })
                 return "break" as const
               }
@@ -2576,15 +2595,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
    * pass-through `jsonSchema()` that bypasses the zod-only tool registry.
    *
    * `submit` returns the text the orchestrator wants the model to read — the
-   * success line, a corrective error list, or a terminal refusal — and whether
-   * the answer was accepted.
+   * success line, a corrective error list, or a terminal refusal — whether the
+   * answer was accepted, and whether the turn is over either way
+   * (`onTurnOver`).
    *
    * @internal Exported for testing
    */
   export function createStructuredOutputTool(input: {
     schema: Record<string, unknown>
     submit: (args: unknown) => Promise<StructuredSubmitResult>
-    onAccepted: () => void
+    onTurnOver: () => void
   }): AITool {
     // Remove $schema property if present (not needed for tool input)
     const { $schema, ...toolSchema } = input.schema
@@ -2595,8 +2615,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       inputSchema: jsonSchema(toolSchema as any),
       async execute(args) {
         const verdict = await input.submit(args)
+        if (verdict.accepted || verdict.terminal) input.onTurnOver()
         if (verdict.accepted) {
-          input.onAccepted()
           return {
             output: verdict.text,
             title: "Structured Output",

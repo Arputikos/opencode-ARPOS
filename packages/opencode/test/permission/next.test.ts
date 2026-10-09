@@ -296,6 +296,22 @@ test("evaluate - no matching pattern returns ask", () => {
   expect(result.action).toBe("ask")
 })
 
+test("evaluate - permission name matches case-insensitively", () => {
+  const result = Permission.evaluate("jira_getJiraIssue", "*", [
+    { permission: "*", pattern: "*", action: "allow" },
+    { permission: "jira_getjiraissue", pattern: "*", action: "ask" },
+  ])
+  expect(result.action).toBe("ask")
+})
+
+test("evaluate - pattern stays case-sensitive outside Windows", () => {
+  const result = Permission.evaluate("edit", "/Desk/x", [
+    { permission: "*", pattern: "*", action: "allow" },
+    { permission: "edit", pattern: "/desk/*", action: "deny" },
+  ])
+  expect(result.action).toBe(process.platform === "win32" ? "deny" : "allow")
+})
+
 test("evaluate - empty rules array returns ask", () => {
   const result = Permission.evaluate("bash", "rm", [])
   expect(result.action).toBe("ask")
@@ -420,6 +436,18 @@ test("disabled - disables tool when denied", () => {
   expect(result.has("bash")).toBe(true)
   expect(result.has("edit")).toBe(false)
   expect(result.has("read")).toBe(false)
+})
+
+test("disabled - matches tool name case-insensitively", () => {
+  const result = Permission.disabled(
+    ["jira_getJiraIssue", "jira_listIssues"],
+    [
+      { permission: "*", pattern: "*", action: "allow" },
+      { permission: "jira_getjiraissue", pattern: "*", action: "deny" },
+    ],
+  )
+  expect(result.has("jira_getJiraIssue")).toBe(true)
+  expect(result.has("jira_listIssues")).toBe(false)
 })
 
 test("disabled - disables edit/write/apply_patch/multiedit when edit denied", () => {

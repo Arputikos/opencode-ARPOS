@@ -27,6 +27,13 @@ test("match with trailing space+wildcard matches command with or without args", 
   expect(Wildcard.match("git commit -m foo", "git *")).toBe(true)
 })
 
+test("matchName ignores case on every platform", () => {
+  expect(Wildcard.matchName("jira_getJiraIssue", "jira_getjiraissue")).toBe(true)
+  expect(Wildcard.matchName("jira_getJiraIssue", "JIRA_*")).toBe(true)
+  expect(Wildcard.matchName("jira_getJiraIssue", "jira_get*")).toBe(true)
+  expect(Wildcard.matchName("jira_getJiraIssue", "jira_list*")).toBe(false)
+})
+
 test("all picks the most specific pattern", () => {
   const rules = {
     "*": "deny",
@@ -86,5 +93,6 @@ test("match handles case-insensitivity on Windows", () => {
   } else {
     // Unix paths are case-sensitive
     expect(Wildcard.match("/users/test/file", "/Users/test/*")).toBe(false)
+    expect(Wildcard.match("/Desk/a", "/desk/a")).toBe(false)
   }
 })

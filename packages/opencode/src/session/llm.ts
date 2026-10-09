@@ -247,7 +247,7 @@ export namespace LLM {
 
             const ruleset = Permission.merge(input.agent.permission ?? [], input.permission ?? [])
             workflowModel.sessionPreapprovedTools = Object.keys(tools).filter((name) => {
-              const match = ruleset.findLast((rule) => Wildcard.match(name, rule.permission))
+              const match = ruleset.findLast((rule) => Wildcard.matchName(name, rule.permission))
               return !match || match.action !== "ask"
             })
 

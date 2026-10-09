@@ -2,9 +2,21 @@ import { sortBy, pipe } from "remeda"
 
 export namespace Wildcard {
   export function match(str: string, pattern: string) {
-    if (str) str = str.replaceAll("\\", "/")
-    if (pattern) pattern = pattern.replaceAll("\\", "/")
-    let escaped = pattern
+    return toRegExp(pattern, process.platform === "win32" ? "si" : "s").test(normalize(str))
+  }
+
+  // Permission and tool names (e.g. MCP `jira_getJiraIssue`) match case-insensitively on every platform;
+  // values — file paths, commands — go through `match`.
+  export function matchName(name: string, pattern: string) {
+    return toRegExp(pattern, "si").test(normalize(name))
+  }
+
+  function normalize(str: string) {
+    return str ? str.replaceAll("\\", "/") : str
+  }
+
+  function toRegExp(pattern: string, flags: string) {
+    let escaped = normalize(pattern)
       .replace(/[.+^${}()|[\]\\]/g, "\\$&") // escape special regex chars
       .replace(/\*/g, ".*") // * becomes .*
       .replace(/\?/g, ".") // ? becomes .
@@ -15,8 +27,7 @@ export namespace Wildcard {
       escaped = escaped.slice(0, -3) + "( .*)?"
     }
 
-    const flags = process.platform === "win32" ? "si" : "s"
-    return new RegExp("^" + escaped + "$", flags).test(str)
+    return new RegExp("^" + escaped + "$", flags)
   }
 
   export function all(input: string, patterns: Record<string, any>) {

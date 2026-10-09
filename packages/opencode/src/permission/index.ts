@@ -178,7 +178,7 @@ export namespace Permission {
           log.info("evaluated", { permission: request.permission, pattern, action: rule })
           if (rule.action === "deny") {
             return yield* new DeniedError({
-              ruleset: ruleset.filter((rule) => Wildcard.match(request.permission, rule.permission)),
+              ruleset: ruleset.filter((rule) => Wildcard.matchName(request.permission, rule.permission)),
             })
           }
           if (rule.action === "allow") continue
@@ -312,7 +312,7 @@ export namespace Permission {
     const result = new Set<string>()
     for (const tool of tools) {
       const permission = EDIT_TOOLS.includes(tool) ? "edit" : tool
-      const rule = ruleset.findLast((rule) => Wildcard.match(permission, rule.permission))
+      const rule = ruleset.findLast((rule) => Wildcard.matchName(permission, rule.permission))
       if (!rule) continue
       if (rule.pattern === "*" && rule.action === "deny") result.add(tool)
     }

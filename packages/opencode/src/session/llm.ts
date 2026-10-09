@@ -245,11 +245,10 @@ export namespace LLM {
               }
             }
 
-            const ruleset = Permission.merge(input.agent.permission ?? [], input.permission ?? [])
-            workflowModel.sessionPreapprovedTools = Object.keys(tools).filter((name) => {
-              const match = ruleset.findLast((rule) => Wildcard.matchName(name, rule.permission))
-              return !match || match.action !== "ask"
-            })
+            workflowModel.sessionPreapprovedTools = preapprovedTools(
+              Object.keys(tools),
+              Permission.merge(input.agent.permission ?? [], input.permission ?? []),
+            )
 
             const approvedToolsForSession = new Set<string>()
             workflowModel.approvalHandler = Instance.bind(async (approvalTools) => {
@@ -442,6 +441,14 @@ export namespace LLM {
       Permission.merge(input.agent.permission, input.permission ?? []),
     )
     return Record.filter(input.tools, (_, k) => input.user.tools?.[k] !== false && !disabled.has(k))
+  }
+
+  // Tools the DWS workflow service may run without asking: no rule, or the last matching rule is not "ask"
+  export function preapprovedTools(names: string[], ruleset: Permission.Ruleset): string[] {
+    return names.filter((name) => {
+      const match = ruleset.findLast((rule) => Wildcard.matchName(name, rule.permission))
+      return !match || match.action !== "ask"
+    })
   }
 
   // Check if messages contain any tool-call content

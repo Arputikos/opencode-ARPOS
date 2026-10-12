@@ -90,9 +90,10 @@ describe("plugin.codex provider.models hook", () => {
       expect(out["gpt-5.5"]!.limit.context).toBe(400_000)
     })
 
-    test("leaves the limit alone for models outside the 5.5/5.6 override", async () => {
+    test("gives gpt-6 the same Codex window as 5.6, and leaves earlier models alone", async () => {
       const out = await catalogFor("oauth")
-      expect(out["gpt-6-astra"]!.limit).toEqual(CATALOG["gpt-6-astra"].limit)
+      expect(out["gpt-6-astra"]!.limit).toEqual({ context: 400_000, input: 272_000, output: 128_000 })
+      expect(out["gpt-5.3-codex-spark"]!.limit).toEqual(CATALOG["gpt-5.3-codex-spark"].limit)
     })
 
     test("zeroes cost — usage is covered by the subscription, not billed per token", async () => {

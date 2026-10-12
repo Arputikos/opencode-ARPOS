@@ -67,19 +67,19 @@ describe("plugin.codex model rule", () => {
   describe("codexContextLimit", () => {
     const apiLimit = { context: 1_050_000, input: 922_000, output: 128_000 }
 
-    test("caps 5.5/5.6 models to the window Codex actually grants", () => {
-      expect(codexContextLimit({ id: "gpt-5.6-luna", limit: apiLimit })).toEqual({
-        context: 400_000,
-        input: 272_000,
-        output: 128_000,
-      })
-      expect(codexContextLimit({ id: "gpt-5.5", limit: apiLimit }).context).toBe(400_000)
+    test("caps 5.5 and later models to the window Codex actually grants", () => {
+      const codex = { context: 400_000, input: 272_000, output: 128_000 }
+      expect(codexContextLimit({ id: "gpt-5.6-luna", limit: apiLimit })).toEqual(codex)
+      expect(codexContextLimit({ id: "gpt-5.5", limit: apiLimit })).toEqual(codex)
+      // Codex's catalogue gives gpt-6-* the same window as gpt-5.6-*.
+      expect(codexContextLimit({ id: "gpt-6-luna", limit: apiLimit })).toEqual(codex)
+      expect(codexContextLimit({ id: "gpt-6.1-sol", limit: apiLimit })).toEqual(codex)
     })
 
-    test("leaves other models' limits untouched", () => {
+    test("leaves earlier models' limits untouched", () => {
       const other = { context: 200_000, input: 190_000, output: 32_000 }
       expect(codexContextLimit({ id: "gpt-5.4-mini", limit: other })).toBe(other)
-      expect(codexContextLimit({ id: "gpt-6-astra", limit: other })).toBe(other)
+      expect(codexContextLimit({ id: "gpt-5.3-codex-spark", limit: other })).toBe(other)
     })
   })
 })

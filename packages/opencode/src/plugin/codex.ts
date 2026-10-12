@@ -393,6 +393,11 @@ export function isCodexOauthModel(model: { api: { id: string }; options?: Record
   if (CODEX_ALLOWED_MODELS.has(id)) return true
   if (CODEX_DISALLOWED_MODELS.has(id)) return false
 
+  return isGpt55OrLater(id)
+}
+
+/** `gpt-5.5` and every later generation (`gpt-5.10`, `gpt-6-*`), compared numerically. */
+function isGpt55OrLater(id: string): boolean {
   const match = id.match(/^gpt-(\d+)(?:\.(\d+))?/)
   if (!match) return false
   const major = Number(match[1])
@@ -407,12 +412,14 @@ export function isCodexOauthModel(model: { api: { id: string }; options?: Record
  * which is far larger than what Codex grants a ChatGPT subscription. Left
  * uncorrected, the session believes it has 2.6x the room it really has, never
  * compacts pre-emptively, and only finds out via a 400 `context_length_exceeded`
- * mid-turn.
+ * mid-turn. Codex's own catalogue (`codex-rs/models-manager/models.json`) lists
+ * gpt-6-* with the same window as gpt-5.6-*, so the rule covers every Codex
+ * generation from 5.5 on.
  */
 export function codexContextLimit<T extends { id: string; limit: { context: number; input?: number; output: number } }>(
   model: T,
 ): T["limit"] {
-  if (!model.id.includes("gpt-5.5") && !model.id.includes("gpt-5.6")) return model.limit
+  if (!isGpt55OrLater(model.id)) return model.limit
   return { context: 400_000, input: 272_000, output: 128_000 }
 }
 

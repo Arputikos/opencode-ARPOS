@@ -2330,7 +2330,23 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
         const raw = input.arguments.match(argsRegex) ?? []
         const args = raw.map((arg) => arg.replace(quoteTrimRegex, ""))
-        const templateCommand = yield* Effect.promise(async () => cmd.template)
+        // Patched (arpos): `!`shell`` blocks are expanded in the command's own
+        // template BEFORE the arguments go in. Upstream expanded them after, so
+        // arguments carrying a block ran it — and with a message starting with
+        // `/command` now routed here from `prompt`, the arguments are whatever
+        // text the session was sent.
+        let templateCommand = yield* Effect.promise(async () => cmd.template)
+        const shellMatches = ConfigMarkdown.shell(templateCommand)
+        if (shellMatches.length > 0) {
+          const sh = Shell.preferred()
+          const results = yield* Effect.promise(() =>
+            Promise.all(
+              shellMatches.map(async ([, cmd]) => (await Process.text([cmd], { shell: sh, nothrow: true })).text),
+            ),
+          )
+          let index = 0
+          templateCommand = templateCommand.replace(bashRegex, () => results[index++])
+        }
 
         const placeholders = templateCommand.match(placeholderRegex) ?? []
         let last = 0
@@ -2353,17 +2369,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           template = template + "\n\n" + input.arguments
         }
 
-        const shellMatches = ConfigMarkdown.shell(template)
-        if (shellMatches.length > 0) {
-          const sh = Shell.preferred()
-          const results = yield* Effect.promise(() =>
-            Promise.all(
-              shellMatches.map(async ([, cmd]) => (await Process.text([cmd], { shell: sh, nothrow: true })).text),
-            ),
-          )
-          let index = 0
-          template = template.replace(bashRegex, () => results[index++])
-        }
         template = template.trim()
 
         const taskModel = yield* Effect.gen(function* () {
@@ -2422,6 +2427,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           agent: userAgent,
           parts,
           variant: input.variant,
+          format: input.format,
         })
         yield* bus.publish(Command.Event.Executed, {
           name: input.command,
@@ -2432,9 +2438,55 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         return result
       })
 
+      /**
+       * Patched (arpos): a message whose text starts with `/name` of a known
+       * command (a command, a skill, an MCP prompt) runs that command — what
+       * `claude -p` does with the same text. `session.command` cannot carry the
+       * structured-output contract and nobody types into its endpoint: a human
+       * or a trigger sends a message. `:` reads as `/`, so `/git:sync` (Claude
+       * Code's spelling) runs `git/sync`. An unknown name (`/workspace/x`) is an
+       * ordinary message. Only the entry point routes: `command` and the task
+       * tool call the inner `prompt`, so a template starting with `/other`
+       * never expands a second time.
+       */
+      const promptOrCommand: (input: PromptInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn(
+        "SessionPrompt.promptOrCommand",
+      )(function* (input: PromptInput) {
+        const slash = yield* slashCommand(input)
+        if (!slash) return yield* prompt(input)
+        return yield* command({
+          sessionID: input.sessionID,
+          messageID: input.messageID,
+          agent: input.agent,
+          model: input.model ? `${input.model.providerID}/${input.model.modelID}` : undefined,
+          variant: input.variant,
+          format: input.format,
+          command: slash.name,
+          arguments: slash.arguments,
+          parts: slash.files,
+        })
+      })
+
+      const slashCommand = Effect.fnUntraced(function* (input: PromptInput) {
+        if (input.noReply || input.system !== undefined || input.tools !== undefined) return undefined
+        const [first, ...rest] = input.parts
+        if (first?.type !== "text" || first.synthetic) return undefined
+        const files = rest.filter((part) => part.type === "file")
+        if (files.length !== rest.length) return undefined
+        const match = first.text.match(slashRegex)
+        if (!match) return undefined
+        const name = match[1]
+        for (const candidate of [name, name.replaceAll(":", "/")]) {
+          if (yield* commands.get(candidate)) {
+            return { name: candidate, arguments: match[2] ?? "", files: files.length > 0 ? files : undefined }
+          }
+        }
+        return undefined
+      })
+
       return Service.of({
         cancel,
-        prompt,
+        prompt: promptOrCommand,
         loop,
         shell,
         command,
@@ -2567,6 +2619,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     arguments: z.string(),
     command: z.string(),
     variant: z.string().optional(),
+    format: MessageV2.Format.optional(),
     parts: z
       .array(
         z.discriminatedUnion("type", [
@@ -2642,5 +2695,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
   // Match [Image N] as single token, quoted strings, or non-space sequences
   const argsRegex = /(?:\[Image\s+\d+\]|"[^"]*"|'[^']*'|[^\s"']+)/gi
   const placeholderRegex = /\$(\d+)/g
+  const slashRegex = /^\/(\S+)(?:\s+([\s\S]*))?$/
   const quoteTrimRegex = /^["']|["']$/g
 }

@@ -36,6 +36,7 @@ import { NamedError } from "@opencode-ai/util/error"
 import { SessionProcessor } from "./processor"
 import { Tool } from "@/tool/tool"
 import { Permission } from "@/permission"
+import { Wildcard } from "@/util/wildcard"
 import { SessionStatus } from "./status"
 import { LLM } from "./llm"
 import { RequestFootprint } from "./request-footprint"
@@ -2327,6 +2328,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           throw error
         }
         const agentName = cmd.agent ?? input.agent ?? (yield* agents.defaultAgent())
+        const agent = yield* agents.get(agentName)
+        if (!agent) {
+          const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
+          const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
+          const error = new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
+          yield* bus.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
+          throw error
+        }
 
         const raw = input.arguments.match(argsRegex) ?? []
         const args = raw.map((arg) => arg.replace(quoteTrimRegex, ""))
@@ -2335,9 +2344,22 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // arguments carrying a block ran it — and with a message starting with
         // `/command` now routed here from `prompt`, the arguments are whatever
         // text the session was sent.
+        //
+        // And only for an agent whose `bash` is unrestricted: these blocks run
+        // here, outside the bash tool and its permission, for every source — a
+        // command, a skill (its whole SKILL.md is the template) or an MCP server's
+        // prompt. Any rule on `bash` that is not `allow` (disabled, an approval
+        // rule, a pattern) leaves the blocks unexpanded, as text.
         let templateCommand = yield* Effect.promise(async () => cmd.template)
         const shellMatches = ConfigMarkdown.shell(templateCommand)
-        if (shellMatches.length > 0) {
+        const session = yield* sessions.get(input.sessionID)
+        const shellAllowed = Permission.merge(agent.permission, session.permission ?? [])
+          .filter((rule) => Wildcard.matchName("bash", rule.permission))
+          .every((rule) => rule.action === "allow")
+        if (shellMatches.length > 0 && !shellAllowed) {
+          yield* elog.warn("command shell blocks not run: bash is restricted", { command: input.command })
+        }
+        if (shellMatches.length > 0 && shellAllowed) {
           const sh = Shell.preferred()
           const results = yield* Effect.promise(() =>
             Promise.all(
@@ -2382,15 +2404,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         })
 
         yield* getModel(taskModel.providerID, taskModel.modelID, input.sessionID)
-
-        const agent = yield* agents.get(agentName)
-        if (!agent) {
-          const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
-          const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
-          const error = new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
-          yield* bus.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
-          throw error
-        }
 
         const templateParts = yield* resolvePromptParts(template)
         const isSubtask = (agent.mode === "subagent" && cmd.subtask !== false) || cmd.subtask === true

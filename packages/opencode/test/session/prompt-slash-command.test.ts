@@ -40,6 +40,7 @@ let server: ReturnType<typeof Bun.serve>
 // denied, so a project `opencode.json` would never load there.
 const configFile = path.join(Global.Path.config, "opencode.json")
 const skillDir = path.join(Global.Path.config, "skill", "tidy")
+const shellSkillDir = path.join(Global.Path.config, "skill", "probe")
 
 beforeAll(async () => {
   server = Bun.serve({
@@ -62,20 +63,30 @@ beforeAll(async () => {
         "git/sync": { template: "Sync the branch $1." },
         chain: { template: "/greet nobody" },
         shell: { template: "Run with $ARGUMENTS" },
+        shelly: { template: "Out: !`echo SHELL-RAN`" },
       },
     }),
   )
   await Bun.write(path.join(skillDir, "SKILL.md"), "---\nname: tidy\ndescription: Tidies the desk\n---\nTIDY-SKILL-BODY\n")
+  await Bun.write(
+    path.join(shellSkillDir, "SKILL.md"),
+    "---\nname: probe\ndescription: Probes\n---\nProbe: !`echo SKILL-SHELL-RAN`\n",
+  )
 })
 
 afterAll(async () => {
   server.stop(true)
   await fs.rm(configFile, { force: true })
   await fs.rm(skillDir, { recursive: true, force: true })
+  await fs.rm(shellSkillDir, { recursive: true, force: true })
 })
 
 /** Sends `text` the way a client does and returns the text of the user message the session stored. */
-async function send(text: string, extra: Partial<SessionPrompt.PromptInput> = {}) {
+async function send(
+  text: string,
+  extra: Partial<SessionPrompt.PromptInput> = {},
+  permission?: { permission: string; pattern: string; action: "allow" | "deny" | "ask" }[],
+) {
   await using tmp = await tmpdir()
   return Instance.provide({
     directory: tmp.path,
@@ -89,7 +100,7 @@ async function send(text: string, extra: Partial<SessionPrompt.PromptInput> = {}
           })
           const prompt = yield* SessionPrompt.Service
           const sessions = yield* Session.Service
-          const session = yield* sessions.create({})
+          const session = yield* sessions.create(permission ? { permission } : {})
           yield* prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text }], ...extra })
           const msgs = yield* sessions.messages({ sessionID: session.id })
           const user = msgs.find((msg) => msg.info.role === "user")!
@@ -140,6 +151,22 @@ describe("session.prompt — /command", () => {
     const result = await send("/shell !`echo PWNED`")
     expect(result.text).toBe("Run with !`echo PWNED`")
   }, 30000)
+
+  test("a command's shell block runs for an agent whose bash is unrestricted", async () => {
+    const result = await send("/shelly")
+    expect(result.text).toBe("Out: SHELL-RAN")
+  }, 30000)
+
+  test("a shell block never runs past a bash rule — command or skill alike", async () => {
+    const disabled = [{ permission: "bash", pattern: "*", action: "deny" as const }]
+    const approval = [{ permission: "bash", pattern: "rm *", action: "ask" as const }]
+    const everyToolAsks = [{ permission: "*", pattern: "*", action: "ask" as const }]
+
+    expect((await send("/shelly", {}, disabled)).text).toBe("Out: !`echo SHELL-RAN`")
+    expect((await send("/shelly", {}, approval)).text).toBe("Out: !`echo SHELL-RAN`")
+    expect((await send("/shelly", {}, everyToolAsks)).text).toBe("Out: !`echo SHELL-RAN`")
+    expect((await send("/probe", {}, approval)).text).toContain("Probe: !`echo SKILL-SHELL-RAN`")
+  }, 60000)
 
   test("the structured-output contract travels with the command", async () => {
     const format = { type: "json_schema" as const, schema: { type: "object" }, retryCount: 0 }

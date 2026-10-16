@@ -186,6 +186,19 @@ export namespace Ripgrep {
     return out
   }
 
+  // Bun builds a worker reading every directory above the process cwd and fails the worker on one it may not
+  // read — a cwd inside a sandbox that withholds its parents (ARPOS's knowledge-base librarian). The worker never
+  // ran, so the same search runs in this thread instead.
+  const WORKER_FAILED = "RipgrepWorkerFailed"
+
+  function workerFailed(input: unknown) {
+    const err = toError(input)
+    err.name = WORKER_FAILED
+    return err
+  }
+
+  const isWorkerFailed = (err: Error) => err.name === WORKER_FAILED
+
   function error(stderr: string, code: number) {
     const err = new Error(stderr.trim() || `ripgrep failed with code ${code}`)
     err.name = "RipgrepError"
@@ -335,8 +348,9 @@ export namespace Ripgrep {
           }
           const onabort = () => done(Effect.fail(abort(input.signal)))
 
+          // The worker answers once: an error event before it is the worker itself failing.
           w.onerror = (evt) => {
-            done(Effect.fail(toError(evt.error ?? evt.message)))
+            done(Effect.fail(workerFailed(evt.error ?? evt.message)))
           }
           w.onmessage = (evt: MessageEvent<WorkerResult | WorkerError>) => {
             const msg = evt.data
@@ -439,6 +453,7 @@ export namespace Ripgrep {
 
         const w = yield* Effect.acquireRelease(worker(), (w) => Effect.sync(() => w.terminate()))
         let open = true
+        let lines = false
         const close = () => {
           if (!open) return false
           open = false
@@ -451,11 +466,13 @@ export namespace Ripgrep {
 
         w.onerror = (evt) => {
           if (!close()) return
-          fail(queue, toError(evt.error ?? evt.message))
+          // Before any line it never ran; after one, starting over would list those lines twice.
+          fail(queue, lines ? toError(evt.error ?? evt.message) : workerFailed(evt.error ?? evt.message))
         }
         w.onmessage = (evt: MessageEvent<WorkerLine | WorkerDone | WorkerError>) => {
           const msg = evt.data
           if (msg.type === "line") {
+            lines = true
             if (open) Queue.offerUnsafe(queue, msg.line)
             return
           }
@@ -499,7 +516,13 @@ export namespace Ripgrep {
         if (!useWorker && input.signal) {
           log.warn("worker unavailable, ripgrep abort disabled")
         }
-        return useWorker ? filesWorker(input) : filesDirect(input)
+        if (!useWorker) return filesDirect(input)
+        return filesWorker(input).pipe(
+          Stream.catchIf(isWorkerFailed, (err) => {
+            log.warn("ripgrep worker failed, listing in this thread", { error: err.message })
+            return filesDirect(input)
+          }),
+        )
       }
 
       const files: Interface["files"] = (input) => source(input)
@@ -564,7 +587,13 @@ export namespace Ripgrep {
         if (!useWorker && input.signal) {
           log.warn("worker unavailable, ripgrep abort disabled")
         }
-        return yield* useWorker ? searchWorker(input) : searchDirect(input)
+        if (!useWorker) return yield* searchDirect(input)
+        return yield* searchWorker(input).pipe(
+          Effect.catchIf(isWorkerFailed, (err) => {
+            log.warn("ripgrep worker failed, searching in this thread", { error: err.message })
+            return searchDirect(input)
+          }),
+        )
       })
 
       return Service.of({ files, tree, search })

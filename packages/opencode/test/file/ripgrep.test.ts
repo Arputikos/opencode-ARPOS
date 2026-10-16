@@ -170,6 +170,34 @@ describe("file.ripgrep", () => {
 })
 
 describe("Ripgrep.Service", () => {
+  test("searches and lists in this thread when the worker cannot start", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "match.ts"), "const needle = 1\n")
+      },
+    })
+    // What Bun does when it cannot read a directory above the cwd while building the worker.
+    class Unbuildable {
+      onerror: ((evt: { error: Error }) => void) | null = null
+      onmessage: unknown = null
+      constructor() {
+        setTimeout(() => this.onerror?.({ error: new Error('Cannot read directory "/above/": AccessDenied') }))
+      }
+      postMessage() {}
+      terminate() {}
+    }
+    const real = globalThis.Worker
+    globalThis.Worker = Unbuildable as unknown as typeof Worker
+    try {
+      const ctl = new AbortController()
+      const result = await Ripgrep.search({ cwd: tmp.path, pattern: "needle", signal: ctl.signal })
+      expect(result.items.map((item) => item.path.text)).toEqual(["match.ts"])
+      expect(await Array.fromAsync(await Ripgrep.files({ cwd: tmp.path, signal: ctl.signal }))).toEqual(["match.ts"])
+    } finally {
+      globalThis.Worker = real
+    }
+  })
+
   test("search returns matched rows", async () => {
     await using tmp = await tmpdir({
       init: async (dir) => {

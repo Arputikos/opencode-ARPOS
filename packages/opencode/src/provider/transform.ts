@@ -247,12 +247,15 @@ export namespace ProviderTransform {
       const filtered = msg.content.map((part) => {
         if (part.type !== "file" && part.type !== "image") return part
 
-        // Check for empty base64 image data
+        // Check for empty base64 image data. Plain slicing, not a regex: the
+        // payload of a photo is millions of characters, and a regex over it
+        // overflowed V8's stack in ARPOS production.
         if (part.type === "image") {
           const imageStr = part.image.toString()
           if (imageStr.startsWith("data:")) {
-            const match = imageStr.match(/^data:([^;]+);base64,(.*)$/)
-            if (match && (!match[2] || match[2].length === 0)) {
+            const comma = imageStr.indexOf(",")
+            const header = comma < 0 ? "" : imageStr.slice(5, comma)
+            if (header.endsWith(";base64") && !header.startsWith(";") && comma === imageStr.length - 1) {
               return {
                 type: "text" as const,
                 text: "ERROR: Image file is empty or corrupted. Please provide a valid image.",

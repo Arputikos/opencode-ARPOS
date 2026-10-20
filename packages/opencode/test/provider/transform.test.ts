@@ -1039,6 +1039,15 @@ describe("ProviderTransform.message - empty image handling", () => {
     expect(result[0].content[1]).toEqual({ type: "image", image: `data:image/png;base64,${validBase64}` })
   })
 
+  test("should keep a multi-megabyte base64 image unchanged without scanning it", () => {
+    const image = `data:image/jpeg;base64,${"A".repeat(40 * 1024 * 1024)}`
+    const msgs = [{ role: "user", content: [{ type: "image", image }] }] as any[]
+
+    const result = ProviderTransform.message(msgs, mockModel, {})
+
+    expect(result[0].content[0]).toEqual({ type: "image", image })
+  })
+
   test("should handle mixed valid and empty images", () => {
     const validBase64 =
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="

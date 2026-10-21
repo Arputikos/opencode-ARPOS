@@ -13,8 +13,13 @@ export class RejectedError extends Schema.TaggedErrorClass<RejectedError>()("Per
 export class CorrectedError extends Schema.TaggedErrorClass<CorrectedError>()("PermissionCorrectedError", {
   feedback: Schema.String,
 }) {
+  // ARPOS: the feedback IS the message, verbatim. The orchestrator is the only
+  // one replying with a message, and it words every refusal itself (operator
+  // refusal, always-deny rule, gate failure) — the same text the Claude Code
+  // engine hands the model. The upstream frame ("The user rejected … with the
+  // following feedback: …") attributed a static rule to a user.
   override get message() {
-    return `The user rejected permission to use this specific tool call with the following feedback: ${this.feedback}`
+    return this.feedback
   }
 }
 

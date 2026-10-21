@@ -126,6 +126,14 @@ const layer = Layer.effect(
             : new PermissionV1.RejectedError(),
         )
 
+        // ARPOS: a refusal WITH a message is aimed at this one call — the
+        // orchestrator sends one per decision (an operator refusing one of
+        // several parallel calls, an always-deny rule firing next to a call
+        // still waiting for a human). Cascading it rejected calls nobody had
+        // decided on. A bare reject keeps the upstream "stop everything"
+        // cascade, which is what an interrupted session relies on.
+        if (input.message) return
+
         for (const [id, item] of pending.entries()) {
           if (item.info.sessionID !== existing.info.sessionID) continue
           pending.delete(id)

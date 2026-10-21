@@ -21,6 +21,15 @@ import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
+// ARPOS: static file imports, not `await import(…, { with: { type: "wasm" } })` — the bundler
+// turns a dynamic attribute import into a JS chunk and keeps the attribute, so the bundled
+// server (script/arpos-bundle.ts) loaded that chunk as the parser instead of the .wasm.
+// @ts-ignore Bun's static file import resolves to the asset's path.
+import treeWasm from "web-tree-sitter/tree-sitter.wasm" with { type: "file" }
+// @ts-ignore see above
+import bashWasm from "tree-sitter-bash/tree-sitter-bash.wasm" with { type: "file" }
+// @ts-ignore see above
+import psWasm from "tree-sitter-powershell/tree-sitter-powershell.wasm" with { type: "file" }
 
 export { Parameters } from "./shell/prompt"
 
@@ -310,20 +319,11 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
 }
 const parser = lazy(async () => {
   const { Parser } = await import("web-tree-sitter")
-  const { default: treeWasm } = await import("web-tree-sitter/tree-sitter.wasm" as string, {
-    with: { type: "wasm" },
-  })
   const treePath = resolveWasm(treeWasm)
   await Parser.init({
     locateFile() {
       return treePath
     },
-  })
-  const { default: bashWasm } = await import("tree-sitter-bash/tree-sitter-bash.wasm" as string, {
-    with: { type: "wasm" },
-  })
-  const { default: psWasm } = await import("tree-sitter-powershell/tree-sitter-powershell.wasm" as string, {
-    with: { type: "wasm" },
   })
   const bashPath = resolveWasm(bashWasm)
   const psPath = resolveWasm(psWasm)

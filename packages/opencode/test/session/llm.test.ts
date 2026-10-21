@@ -86,6 +86,34 @@ function llmLayerWithExecutor(
   ])
 }
 
+describe("session.llm.preapprovedTools", () => {
+  // ARPOS writes MCP tool names lowercased; OpenCode registers them with their original case
+  const ruleset = [
+    { permission: "*", pattern: "*", action: "allow" as const },
+    { permission: "jira_getjiraissue", pattern: "*", action: "ask" as const },
+  ]
+
+  test("an ask rule written in another case keeps the tool out of the pre-approved list", () => {
+    expect(LLM.preapprovedTools(["jira_getJiraIssue", "jira_listProjects", "read"], ruleset)).toEqual([
+      "jira_listProjects",
+      "read",
+    ])
+  })
+
+  test("an uppercase wildcard ask rule matches mixed-case tool names", () => {
+    const rules = [...ruleset.slice(0, 1), { permission: "JIRA_GET*", pattern: "*", action: "ask" as const }]
+    expect(LLM.preapprovedTools(["jira_getJiraIssue", "jira_listProjects"], rules)).toEqual(["jira_listProjects"])
+  })
+
+  test("an allow rule written in another case overrides a catch-all ask", () => {
+    const rules = [
+      { permission: "*", pattern: "*", action: "ask" as const },
+      { permission: "JIRA_GETJIRAISSUE", pattern: "*", action: "allow" as const },
+    ]
+    expect(LLM.preapprovedTools(["jira_getJiraIssue", "jira_listProjects"], rules)).toEqual(["jira_getJiraIssue"])
+  })
+})
+
 describe("session.llm.hasToolCalls", () => {
   test("returns false for empty messages array", () => {
     expect(LLM.hasToolCalls([])).toBe(false)

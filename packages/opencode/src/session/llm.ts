@@ -19,7 +19,7 @@ import { Plugin } from "@/plugin"
 import { Permission } from "@/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
-import { Wildcard } from "@/util/wildcard"
+import { Wildcard } from "@opencode-ai/core/util/wildcard"
 import { SessionID } from "@/session/schema"
 import { Auth } from "@/auth"
 import { EffectBridge } from "@/effect/bridge"
@@ -146,11 +146,10 @@ const live: Layer.Layer<
           }
         }
 
-        const ruleset = Permission.merge(input.agent.permission ?? [], input.permission ?? [])
-        workflowModel.sessionPreapprovedTools = Object.keys(prepared.tools).filter((name) => {
-          const match = ruleset.findLast((rule) => Wildcard.match(name, rule.permission))
-          return !match || match.action !== "ask"
-        })
+        workflowModel.sessionPreapprovedTools = preapprovedTools(
+          Object.keys(prepared.tools),
+          Permission.merge(input.agent.permission ?? [], input.permission ?? []),
+        )
 
         const approvedToolsForSession = new Set<string>()
         workflowModel.approvalHandler = bridge.bind(async (approvalTools) => {
@@ -385,6 +384,14 @@ const live: Layer.Layer<
 )
 
 export const hasToolCalls = LLMRequestPrep.hasToolCalls
+
+// Tools the DWS workflow service may run without asking: no rule, or the last matching rule is not "ask"
+export function preapprovedTools(names: string[], ruleset: PermissionV1.Ruleset): string[] {
+  return names.filter((name) => {
+    const match = ruleset.findLast((rule) => Wildcard.matchName(name, rule.permission))
+    return !match || match.action !== "ask"
+  })
+}
 
 export const node = LayerNode.make({
   service: Service,

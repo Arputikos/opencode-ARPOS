@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test"
 import { Wildcard } from "@/util/wildcard"
+import { Wildcard as CoreWildcard } from "@opencode-ai/core/util/wildcard"
 
 test("match handles glob tokens", () => {
   expect(Wildcard.match("file1.txt", "file?.txt")).toBe(true)
@@ -72,6 +73,14 @@ test("allStructured handles sed flags", () => {
   expect(Wildcard.allStructured({ head: "sed", tail: ["-i.bak", "file"] }, rules)).toBe("ask")
   expect(Wildcard.allStructured({ head: "sed", tail: ["-n", "1p", "file"] }, rules)).toBe("allow")
   expect(Wildcard.allStructured({ head: "sed", tail: ["-i", "-n", "/./p", "myfile.txt"] }, rules)).toBe("ask")
+})
+
+test("matchName ignores case on every platform", () => {
+  expect(CoreWildcard.matchName("jira_getJiraIssue", "jira_getjiraissue")).toBe(true)
+  expect(CoreWildcard.matchName("jira_getJiraIssue", "JIRA_*")).toBe(true)
+  expect(CoreWildcard.matchName("jira_getJiraIssue", "jira_get*")).toBe(true)
+  expect(CoreWildcard.matchName("jira_getJiraIssue", "jira_list*")).toBe(false)
+  expect(CoreWildcard.match("/Desk/a", "/desk/a")).toBe(process.platform === "win32")
 })
 
 test("match normalizes slashes for cross-platform globbing", () => {

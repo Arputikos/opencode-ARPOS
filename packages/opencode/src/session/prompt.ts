@@ -1078,12 +1078,157 @@ const layer = Layer.effect(
       throw new Error("Impossible")
     })
 
+    /**
+     * ARPOS: after a server restart the in-memory permission Deferreds are gone,
+     * but tool parts that were mid-HITL stay in SQLite as "pending"/"running".
+     * The loop alone would only render them as "[Tool execution was interrupted]"
+     * and for built-in tools the model usually gives up or hallucinates a result.
+     *
+     * Before the first step, re-execute every such orphan on the last assistant
+     * message with its stored input, through the same tool set a normal step
+     * resolves (built-in, plugin and MCP tools alike). The run keeps the orphan's
+     * messageID/callID, so a fresh permission.asked carries the original
+     * identifiers and the orchestrator can answer it from the already-decided
+     * HITL row. The result (or the real error) is written onto the SAME part.
+     */
+    const resumeOrphanTools = Effect.fn("SessionPrompt.resumeOrphanTools")(function* (sessionID: SessionID) {
+      const msgs = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
+        Effect.provideService(Database.Service, database),
+      )
+      const last = msgs.findLast((m) => m.info.role === "assistant")
+      if (!last || last.info.role !== "assistant") return
+      const orphans = last.parts.filter(
+        (p): p is SessionV1.ToolPart =>
+          p.type === "tool" && (p.state.status === "pending" || p.state.status === "running"),
+      )
+      if (orphans.length === 0) return
+      const lastUser = msgs.findLast((m) => m.info.role === "user")?.info
+      if (!lastUser || lastUser.role !== "user") return
+      const agent = yield* agents.get(lastUser.agent)
+      if (!agent) return
+      const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+      const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+      yield* Effect.logInfo("resumeOrphanTools", { "session.id": sessionID, count: orphans.length })
+
+      const parts = new Map(orphans.map((part) => [part.callID, part]))
+      const write = Effect.fnUntraced(function* (part: SessionV1.ToolPart) {
+        const saved = yield* sessions.updatePart(part)
+        parts.set(part.callID, saved)
+        return saved
+      })
+      const settle = (callID: string, state: SessionV1.ToolPart["state"]) => {
+        const part = parts.get(callID)
+        return part ? write({ ...part, state }) : Effect.void
+      }
+      const startOf = (part: SessionV1.ToolPart) => ("time" in part.state ? part.state.time.start : Date.now())
+
+      const tools = yield* SessionTools.resolve({
+        agent,
+        session,
+        model,
+        processor: {
+          message: last.info,
+          updateToolCall: (callID, update) => {
+            const part = parts.get(callID)
+            return part ? write(update(part)) : Effect.succeed(undefined)
+          },
+          completeToolCall: (callID, output) => {
+            const part = parts.get(callID)
+            if (!part) return Effect.void
+            return settle(callID, {
+              status: "completed",
+              input: part.state.input,
+              output: output.output,
+              metadata: output.metadata,
+              title: output.title,
+              time: { start: startOf(part), end: Date.now() },
+              attachments: output.attachments,
+            })
+          },
+        },
+        bypassAgentCheck: false,
+        messages: msgs,
+        promptOps: yield* ops(),
+      }).pipe(
+        Effect.provideService(Plugin.Service, plugin),
+        Effect.provideService(Permission.Service, permission),
+        Effect.provideService(ToolRegistry.Service, registry),
+        Effect.provideService(MCP.Service, mcp),
+        Effect.provideService(Truncate.Service, truncate),
+        Effect.provideService(RuntimeFlags.Service, flags),
+      )
+
+      for (const orphan of orphans) {
+        const input = orphan.state.input
+        const start = startOf(orphan)
+        const execute = tools[orphan.tool]?.execute
+        if (!execute) {
+          yield* Effect.logWarning("resumeOrphanTools.missing_tool", { "session.id": sessionID, tool: orphan.tool })
+          yield* settle(orphan.callID, {
+            status: "error",
+            input,
+            error: `Tool "${orphan.tool}" is not available after server restart`,
+            time: { start, end: Date.now() },
+          })
+          continue
+        }
+        yield* settle(orphan.callID, { status: "running", input, time: { start } })
+        const exit = yield* Effect.promise(
+          () =>
+            Promise.resolve(
+              execute(input, {
+                toolCallId: orphan.callID,
+                abortSignal: new AbortController().signal,
+                messages: [],
+              }),
+            ) as Promise<Omit<Tool.ExecuteResult, "attachments"> & { attachments?: SessionV1.FilePart[] }>,
+        ).pipe(Effect.exit)
+        const current = parts.get(orphan.callID)!
+        const metadata = "metadata" in current.state ? (current.state.metadata ?? {}) : {}
+        if (Exit.isSuccess(exit)) {
+          yield* settle(orphan.callID, {
+            status: "completed",
+            input,
+            output: exit.value.output,
+            metadata: exit.value.metadata,
+            title: exit.value.title,
+            time: { start, end: Date.now() },
+            attachments: exit.value.attachments,
+          })
+          continue
+        }
+        const err = Cause.squash(exit.cause)
+        const message = err instanceof Error ? err.message : String(err)
+        yield* Effect.logWarning("resumeOrphanTools.execute_failed", {
+          "session.id": sessionID,
+          tool: orphan.tool,
+          callID: orphan.callID,
+          error: message,
+        })
+        yield* settle(orphan.callID, {
+          status: "error",
+          input,
+          error: message,
+          metadata,
+          time: { start, end: Date.now() },
+        })
+      }
+    })
+
     const runLoop: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
       function* (sessionID: SessionID) {
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+
+        // ARPOS: re-drive tool calls orphaned by a server restart before the
+        // first step, so the model reads a real tool result, not an interruption.
+        yield* resumeOrphanTools(sessionID).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logError("resumeOrphanTools failed", { "session.id": sessionID, cause: Cause.pretty(cause) }),
+          ),
+        )
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })

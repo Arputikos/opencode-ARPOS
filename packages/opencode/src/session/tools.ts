@@ -38,6 +38,17 @@ const SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES = new Set([
   "image/webp",
 ])
 
+// ARPOS: the MCP server each resolved tool came from. The tool key
+// (`<server>_<tool>`, both sanitized) cannot be split back — server names
+// contain `_` and `-` as freely as tool names do — so the origin is recorded
+// when the tool is built. A WeakMap because every step rebuilds the tools.
+const toolServers = new WeakMap<AITool, string>()
+
+/** ARPOS: the MCP server a tool from `resolve` belongs to; undefined for any other tool. */
+export function serverOf(tool: AITool): string | undefined {
+  return toolServers.get(tool)
+}
+
 export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
   model: Provider.Model
@@ -142,9 +153,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     })
   }
 
-  const hasMcpResourceServer = Object.values(yield* mcp.clients()).some(
-    (client) => !!client.getServerCapabilities()?.resources,
-  )
+  const clients = yield* mcp.clients()
+  const hasMcpResourceServer = Object.values(clients).some((client) => !!client.getServerCapabilities()?.resources)
   if (hasMcpResourceServer) {
     tools[MCP_RESOURCE_TOOLS.list] = tool({
       description:
@@ -500,6 +510,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         }),
       )
     tools[key] = item
+    const server = Object.keys(clients).find((name) => clients[name] === entry.client)
+    if (server !== undefined) toolServers.set(item, server)
   }
 
   return tools

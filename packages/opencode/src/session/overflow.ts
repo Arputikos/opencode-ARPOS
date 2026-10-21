@@ -19,6 +19,18 @@ export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outpu
     : Math.max(0, context - ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax))
 }
 
+/**
+ * ARPOS: the input size at which a session compacts pre-emptively; undefined
+ * when auto-compaction is off or the model's window is unknown — there is no
+ * line to compact at. The request footprint asks the same question about its
+ * fixed overhead: if the system prompt and tool schemas alone reach this line,
+ * no amount of compaction can get a request under it.
+ */
+export function compactionThreshold(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
+  if (input.cfg.compaction?.auto === false) return undefined
+  return usable(input) || undefined
+}
+
 export function isOverflow(input: {
   cfg: ConfigV1.Info
   tokens: SessionV1.Assistant["tokens"]

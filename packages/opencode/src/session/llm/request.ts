@@ -55,15 +55,7 @@ const mergeOptions = (target: Record<string, any>, source: Record<string, any> |
 
 export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: PrepareInput) {
   const isOpenaiOauth = input.provider.id === "openai" && input.auth?.type === "oauth"
-  const system = [
-    [
-      ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
-      ...input.system,
-      ...(input.user.system ? [input.user.system] : []),
-    ]
-      .filter((x) => x)
-      .join("\n"),
-  ]
+  const system = [baseSystem(input)]
 
   const header = system[0]
   yield* input.plugin.trigger(
@@ -207,7 +199,22 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   }
 })
 
-function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission" | "user">) {
+/**
+ * The system prompt as sent, before plugins transform it. ARPOS: exported, with
+ * `resolveTools`, so the request footprint measures the same system prompt and
+ * the same tool set that the request carries.
+ */
+export function baseSystem(input: Pick<PrepareInput, "agent" | "model" | "system" | "user">) {
+  return [
+    ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
+    ...input.system,
+    ...(input.user.system ? [input.user.system] : []),
+  ]
+    .filter((x) => x)
+    .join("\n")
+}
+
+export function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission" | "user">) {
   const disabled = Permission.disabled(
     Object.keys(input.tools),
     Permission.merge(input.agent.permission, input.permission ?? []),

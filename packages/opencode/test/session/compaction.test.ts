@@ -202,6 +202,7 @@ function fake(
     get message() {
       return msg
     },
+    overflowRejected: false,
     updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
     completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
     startToolCall: Effect.fn("TestSessionProcessor.startToolCall")(() => Effect.void),
@@ -1196,7 +1197,10 @@ describe("session.compaction.process", () => {
       expect(result).toBe("continue")
       expect(last?.info.role).toBe("user")
       if (last?.parts[0]?.type === "text") {
-        expect(last.parts[0].text).toContain("previous request exceeded the provider's size limit")
+        // ARPOS: no media in this history, so the prompt must not claim any.
+        expect(last.parts[0].text).toContain("exceeded this model's context window")
+        expect(last.parts[0].text).toContain("No attachments were involved")
+        expect(last.parts[0].text).not.toContain("media")
       }
     }),
   )

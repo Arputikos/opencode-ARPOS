@@ -14,7 +14,7 @@ import { NotFoundError } from "@/storage/storage"
 
 import { Effect, Layer, Context } from "effect"
 import { InstanceState } from "@/effect/instance-state"
-import { isOverflow as overflow, usable } from "./overflow"
+import { compactionThreshold, isOverflow as overflow, usable } from "./overflow"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -162,11 +162,43 @@ function splitTurn(input: {
   })
 }
 
+/**
+ * ARPOS: the synthetic "carry on" prompt injected after an automatic compaction.
+ *
+ * The overflow variant used to assert, unconditionally, that the request
+ * "exceeded the provider's size limit due to large media attachments" and that
+ * "media files were removed from context". Media is only ever stripped on the
+ * `replay` path, and this prompt is injected on the path where there is nothing
+ * to replay — so the agent apologised for oversized images that never existed.
+ * Claim media only when the compacted history actually carried media; otherwise
+ * say what is known and name the causes a compaction cannot fix.
+ */
+export function continuePrompt(input: { overflow: boolean; hadMedia: boolean }): string {
+  const tail = "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+  if (!input.overflow) return tail
+  if (input.hadMedia)
+    return (
+      "The previous request exceeded the provider's size limit. The conversation was compacted and media files " +
+      "were removed from context. If the user was asking about attached images or files, explain that the " +
+      "attachments were too large to process and suggest they try again with smaller or fewer files.\n\n" +
+      tail
+    )
+  return (
+    "The previous request exceeded this model's context window, so the conversation was compacted. No " +
+    "attachments were involved. If the request keeps failing, the size is coming from something other than the " +
+    "conversation — typically the number of enabled tools/MCP servers, or a model whose context window is too " +
+    "small for this session.\n\n" +
+    tail
+  )
+}
+
 export interface Interface {
   readonly isOverflow: (input: {
     tokens: SessionV1.Assistant["tokens"]
     model: Provider.Model
   }) => Effect.Effect<boolean>
+  /** ARPOS: the input size at which auto-compaction kicks in; undefined when it is off or the window is unknown. */
+  readonly threshold: (model: Provider.Model) => Effect.Effect<number | undefined>
   readonly prune: (input: { sessionID: SessionID }) => Effect.Effect<void>
   readonly process: (input: {
     parentID: MessageID
@@ -210,6 +242,10 @@ const layer = Layer.effect(
         model: input.model,
         outputTokenMax: flags.outputTokenMax,
       })
+    })
+
+    const threshold = Effect.fn("SessionCompaction.threshold")(function* (model: Provider.Model) {
+      return compactionThreshold({ cfg: yield* config.get(), model, outputTokenMax: flags.outputTokenMax })
     })
 
     const estimate = Effect.fn("SessionCompaction.estimate")(function* (input: {
@@ -455,6 +491,9 @@ const layer = Layer.effect(
         }).toObject()
         processor.message.finish = "error"
         yield* session.updateMessage(processor.message)
+        // ARPOS: publish it too — an error that only sits on the message never
+        // reaches the ARPOS orchestrator, and the turn would read as completed.
+        yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error: processor.message.error })
         return "stop"
       }
 
@@ -524,11 +563,10 @@ const layer = Layer.effect(
               agent: userMessage.agent,
               model: userMessage.model,
             })
-            const text =
-              (input.overflow
-                ? "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.\n\n"
-                : "") +
-              "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+            const text = continuePrompt({
+              overflow: input.overflow === true,
+              hadMedia: input.messages.some((m) => m.parts.some((p) => p.type === "file" && MessageV2.isMedia(p.mime))),
+            })
             yield* session.updatePart({
               id: PartID.ascending(),
               messageID: continueMsg.id,
@@ -583,6 +621,7 @@ const layer = Layer.effect(
 
     return Service.of({
       isOverflow,
+      threshold,
       prune,
       process: processCompaction,
       create,

@@ -31,6 +31,7 @@ import { ConfigMarkdown } from "@/config/markdown"
 import { SessionSummary } from "./summary"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { SessionProcessor } from "./processor"
+import { RequestFootprint } from "./request-footprint"
 import { Tool } from "@/tool/tool"
 import { Permission } from "@/permission"
 import { Wildcard } from "@opencode-ai/core/util/wildcard"
@@ -56,6 +57,7 @@ import { eq } from "drizzle-orm"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
+import { LLMRequestPrep } from "./llm/request"
 import { LLMEvent } from "@opencode-ai/llm"
 
 // @ts-ignore
@@ -172,6 +174,153 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
   // cleanup() marks abandoned tool_use blocks this way after retries/aborts.
   // They are not pending work and must not trigger an assistant-prefill request.
   return part.state.status === "error" && part.state.metadata?.interrupted === true
+}
+
+/**
+ * ARPOS: how many compactions in a row the loop may start before the turn gives
+ * up. "In a row" means no request in between went through without asking for
+ * another compaction. 1 would be wrong — one compaction followed by a request
+ * that fits is normal recovery. 2 is the smallest value that tells "compaction
+ * fixed it" from "compaction is irrelevant to what overflowed": if the request
+ * built from the compacted conversation needs compacting again, the excess is
+ * not in the conversation (tool schemas, the system prompt, a window smaller
+ * than advertised) and no further compaction will change that.
+ */
+const COMPACTION_STREAK_LIMIT = 2
+
+/**
+ * ARPOS: may the loop start another compaction?
+ *
+ * Every compaction the loop asks for goes through here — the provider (or the
+ * pre-flight check) refusing a request as too large AND our own token
+ * accounting deciding one is due. `fixed` is what every request carries whatever
+ * the conversation holds — system prompt and tool schemas
+ * (`RequestFootprint.fixed`); `threshold` is where auto-compaction kicks in,
+ * undefined when it is off. When the fixed part alone reaches the threshold,
+ * even the first compaction is pointless.
+ */
+export function nextOverflowCompaction(input: { consecutive: number; fixed: number; threshold: number | undefined }): {
+  action: "compact" | "no-room" | "give-up"
+  consecutive: number
+} {
+  if (input.threshold !== undefined && input.fixed >= input.threshold) {
+    return { action: "no-room", consecutive: input.consecutive }
+  }
+  const consecutive = input.consecutive + 1
+  return { action: consecutive >= COMPACTION_STREAK_LIMIT ? "give-up" : "compact", consecutive }
+}
+
+/**
+ * ARPOS: did this step end empty in the way an oversized request does — no
+ * text, no reasoning, no tool call, no file, and a finish that explains nothing
+ * (`length`, `other`, `unknown`, or none)? A provider can end a request that way
+ * without an error (OpenAI's `incomplete: max_output_tokens` with zero usage,
+ * seen when a huge tool set came along), and the turn would otherwise end
+ * "successfully" with an empty reply. Any other empty finish (`content-filter`,
+ * an empty `stop`) has its own explanation and is left to the orchestrator.
+ */
+export function isEmptyStep(input: { parts: SessionV1.Part[]; finish: string | undefined }) {
+  if (input.finish !== undefined && !UNEXPLAINED_FINISHES.has(input.finish)) return false
+  return !input.parts.some((part) => {
+    if (part.type === "text" || part.type === "reasoning") return part.text.length > 0
+    return part.type === "tool" || part.type === "file"
+  })
+}
+
+const UNEXPLAINED_FINISHES = new Set(["length", "other", "unknown"])
+
+/**
+ * ARPOS: should a queued compaction be dropped instead of run?
+ *
+ * A compaction queued with `overflow: true` carries a verdict that belongs to
+ * ONE model: this provider refused THIS request as too large. The verdict is
+ * persisted on the carrier user message and can outlive the model that earned
+ * it — a credential/model swap respawns the server, the queued part is picked up
+ * again, and the compaction would run under a model that never refused
+ * anything, destroying history for a problem that does not exist. Dropping is
+ * safe: if the new model cannot fit the request either, the provider refuses it
+ * again and a fresh compaction is queued. An ordinary compaction (`overflow:
+ * false` — our own token accounting) is NEVER dropped.
+ */
+export function shouldDropStaleOverflowCompaction(input: {
+  overflow: boolean
+  modelChangedSinceQueued: boolean
+}): boolean {
+  return input.overflow && input.modelChangedSinceQueued
+}
+
+/**
+ * ARPOS: does this message CARRY an overflow compaction request that was queued
+ * under a different model? `compaction.create()` records the request as a
+ * `role: "user"` message whose only parts are `compaction`, pinned to the model
+ * running when it was queued. That carrier reaches the model —
+ * `toModelMessages` renders a compaction part as the user asking "What did we
+ * do so far?" — so dropping the queued task alone is not enough. Only a message
+ * that is nothing BUT compaction parts qualifies; content is never deleted on a
+ * guess. Whether the compaction already ran is `findStaleOverflowCompactions`'
+ * half of the decision.
+ */
+export function isOverflowCompactionCarrier(
+  message: {
+    info: { role: string; model?: { providerID: string; modelID: string } }
+    parts: { type: string; overflow?: boolean }[]
+  },
+  currentModel: { providerID: string; modelID: string },
+): boolean {
+  if (message.info.role !== "user") return false
+  const queued = message.info.model
+  if (!queued) return false
+  if (message.parts.length === 0) return false
+  if (!message.parts.every((part) => part.type === "compaction")) return false
+  if (!message.parts.some((part) => part.overflow === true)) return false
+  return shouldDropStaleOverflowCompaction({
+    overflow: true,
+    modelChangedSinceQueued: queued.providerID !== currentModel.providerID || queued.modelID !== currentModel.modelID,
+  })
+}
+
+export interface OverflowScanMessage {
+  info: {
+    id: string
+    role: string
+    parentID?: string
+    /** `unknown`, not `boolean`: a USER message carries a summary OBJECT under the same name. */
+    summary?: unknown
+    finish?: string
+    error?: unknown
+    model?: { providerID: string; modelID: string }
+  }
+  parts: { type: string; overflow?: boolean }[]
+}
+
+/**
+ * ARPOS: the carriers this turn must pretend were never queued.
+ *
+ * A carrier whose compaction ALREADY RAN is untouchable: `filterCompacted` cuts
+ * the history AT it, with the `summary` assistant message right behind — so
+ * removing it would hand the provider a window that opens on an assistant
+ * message (Anthropic: "first message must use the 'user' role"). "Already ran"
+ * is decided with `filterCompacted`'s own predicate — an assistant `summary`
+ * message that finished without an error and points at the carrier.
+ */
+export function findStaleOverflowCompactions(
+  msgs: OverflowScanMessage[],
+  currentModel: { providerID: string; modelID: string },
+): { id: string; queuedModel: { providerID: string; modelID: string } }[] {
+  const summarised = new Set<string>()
+  for (const { info } of msgs) {
+    if (info.role === "assistant" && info.summary === true && info.finish && !info.error && info.parentID)
+      summarised.add(info.parentID)
+  }
+  const stale: { id: string; queuedModel: { providerID: string; modelID: string } }[] = []
+  for (const msg of msgs) {
+    const queuedModel = msg.info.model
+    if (!queuedModel) continue
+    if (summarised.has(msg.info.id)) continue
+    if (!isOverflowCompactionCarrier(msg, currentModel)) continue
+    stale.push({ id: msg.info.id, queuedModel })
+  }
+  return stale
 }
 
 export interface Interface {
@@ -1307,7 +1456,76 @@ const layer = Layer.effect(
         // delivered — or, after a terminal refusal, forever.
         let structuredDone = false
         let step = 0
+        // ARPOS: compactions started in a row, with no request in between that
+        // fit. See COMPACTION_STREAK_LIMIT.
+        let compactionStreak = 0
+        // ARPOS: upstream keeps the loop going after an `unknown` finish. One
+        // empty `unknown` step gets that retry; a second in the same turn ends it —
+        // otherwise a provider that keeps answering with nothing is asked forever.
+        let retriedEmptyUnknown = false
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+
+        // ARPOS: end the turn on an error the orchestrator can show — recorded on
+        // the message AND published, like `halt()` does for a provider error; a
+        // message error alone never leaves the fork.
+        const failTurn = Effect.fnUntraced(function* (
+          message: SessionV1.Assistant,
+          footprint: RequestFootprint.Info,
+          reason: RequestFootprint.Reason,
+        ) {
+          const error = new SessionV1.ContextOverflowError({
+            message: RequestFootprint.format(footprint, reason),
+          }).toObject()
+          message.error = error
+          message.finish = "error"
+          message.time.completed ??= Date.now()
+          yield* sessions.updateMessage(message)
+          yield* events.publish(Session.Event.Error, { sessionID, error })
+        })
+
+        // ARPOS: every compaction this loop starts goes through here, so that
+        // none can start when it cannot help: not when the request's fixed
+        // overhead alone is over the threshold, and not when the previous
+        // compaction just failed to bring the request under it.
+        const requestCompaction = Effect.fnUntraced(function* (input: {
+          message: SessionV1.Assistant
+          model: Provider.Model
+          user: SessionV1.User
+          footprint: RequestFootprint.Info
+          rejected: boolean
+        }) {
+          const threshold = yield* compaction.threshold(input.model)
+          const next = nextOverflowCompaction({
+            consecutive: compactionStreak,
+            fixed: RequestFootprint.fixed(input.footprint),
+            threshold,
+          })
+          compactionStreak = next.consecutive
+          if (next.action === "no-room" && threshold !== undefined) {
+            yield* failTurn(input.message, input.footprint, { type: "no-room", threshold })
+            return "break" as const
+          }
+          if (next.action === "give-up") {
+            yield* failTurn(
+              input.message,
+              input.footprint,
+              input.rejected
+                ? { type: "rejected", times: compactionStreak }
+                : { type: "compaction-loop", times: compactionStreak },
+            )
+            return "break" as const
+          }
+          yield* compaction.create({
+            sessionID,
+            agent: input.user.agent,
+            model: input.user.model,
+            auto: true,
+            // Ask the processor whether the provider refused the request rather
+            // than inferring it from a missing finish reason.
+            overflow: input.rejected,
+          })
+          return "continue" as const
+        })
 
         // ARPOS: re-drive tool calls orphaned by a server restart before the
         // first step, so the model reads a real tool result, not an interruption.
@@ -1325,9 +1543,56 @@ const layer = Layer.effect(
             Effect.provideService(Database.Service, database),
           )
 
-          const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
+          let { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+
+          // ARPOS: the model this turn SHOULD run on — the agent's own model if
+          // it has one, else the global default (`opencode.json` `model`, which
+          // ARPOS rewrites on every spawn). The pinned model of the user message
+          // (and the session's stored model) goes stale when the operator changes
+          // the agent's model mid-session; without this, continuing or resuming
+          // the turn re-runs on the old model ("Model not found"). In memory only.
+          const target =
+            (yield* agents.get(lastUser.agent))?.model ?? (yield* provider.defaultModel().pipe(Effect.orDie))
+
+          // ARPOS: drop a compaction queued under a model that is no longer the
+          // one running — carrier message and all (see
+          // `findStaleOverflowCompactions`). Runs BEFORE the rebind, while every
+          // message still carries the model it was persisted with.
+          const stale = findStaleOverflowCompactions(msgs, target)
+          if (stale.length > 0) {
+            const staleIds = new Set(stale.map((entry) => entry.id))
+            const kept = msgs.filter((msg) => !staleIds.has(msg.info.id))
+            // A turn with nothing left to answer cannot run; keeping the stale
+            // request is the lesser evil.
+            if (kept.some((msg) => msg.info.role === "user")) {
+              for (const entry of stale) {
+                yield* Effect.logInfo("dropping a stale overflow compaction", {
+                  "session.id": sessionID,
+                  messageID: entry.id,
+                  queuedUnder: `${entry.queuedModel.providerID}/${entry.queuedModel.modelID}`,
+                  runningUnder: `${target.providerID}/${target.modelID}`,
+                })
+              }
+              msgs = kept
+              ;({ user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs))
+              if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+            } else {
+              yield* Effect.logWarning("keeping a stale overflow compaction — it is the only user message left", {
+                "session.id": sessionID,
+              })
+            }
+          }
+
+          if (target.providerID !== lastUser.model.providerID || target.modelID !== lastUser.model.modelID) {
+            yield* Effect.logInfo("rebinding pinned user-message model to the current model", {
+              "session.id": sessionID,
+              from: `${lastUser.model.providerID}/${lastUser.model.modelID}`,
+              to: `${target.providerID}/${target.modelID}`,
+            })
+            lastUser.model = { ...lastUser.model, providerID: target.providerID, modelID: target.modelID }
+          }
 
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
@@ -1502,6 +1767,45 @@ const layer = Layer.effect(
             ]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+
+            // ARPOS: measure the request before sending it — the same system
+            // prompt and tool set the request carries. One the model cannot
+            // accept is not sent: excess in the conversation → compact (what a
+            // provider rejection would lead to, minus the wasted request); tools
+            // and system prompt alone too large → end the turn with the numbers,
+            // naming which MCP server weighs how much.
+            const footprint = yield* Effect.promise(() =>
+              RequestFootprint.measure({
+                model,
+                system: [LLMRequestPrep.baseSystem({ agent, model, system, user: lastUser })],
+                messages: modelMsgs,
+                tools: LLMRequestPrep.resolveTools({ tools, agent, permission: session.permission, user: lastUser }),
+                serverOf: SessionTools.serverOf,
+              }),
+            )
+            const preflight = RequestFootprint.preflight(footprint, yield* compaction.threshold(model))
+            if (preflight === "too-large") {
+              yield* Effect.logWarning("request too large, not sent", {
+                "session.id": sessionID,
+                total: footprint.total,
+                inputLimit: footprint.inputLimit,
+              })
+              yield* failTurn(handle.message, footprint, { type: "too-large" })
+              return "break" as const
+            }
+            if (preflight === "compact") {
+              // Never sent, so the processor never closes the message.
+              handle.message.time.completed = Date.now()
+              yield* sessions.updateMessage(handle.message)
+              return yield* requestCompaction({
+                message: handle.message,
+                model,
+                user: lastUser,
+                footprint,
+                rejected: true,
+              })
+            }
+
             const result = yield* handle.process({
               user: lastUser,
               agent,
@@ -1545,16 +1849,40 @@ const layer = Layer.effect(
               }
             }
 
+            // ARPOS: a step that produced nothing ends the turn with the
+            // request's numbers — below the limit, a large tool set is still the
+            // first suspect.
+            const empty =
+              result !== "compact" &&
+              !handle.message.error &&
+              isEmptyStep({
+                parts: yield* MessageV2.parts(handle.message.id).pipe(
+                  Effect.provideService(Database.Service, database),
+                ),
+                finish: handle.message.finish,
+              })
+            if (empty && handle.message.finish === "unknown" && !retriedEmptyUnknown) {
+              retriedEmptyUnknown = true
+            } else if (empty) {
+              yield* failTurn(handle.message, RequestFootprint.withMeasuredInput(footprint, handle.message.tokens), {
+                type: "empty",
+                finish: handle.message.finish,
+                structured: format.type === "json_schema",
+              })
+              return "break" as const
+            }
+
             if (result === "stop") return "break" as const
             if (result === "compact") {
-              yield* compaction.create({
-                sessionID,
-                agent: lastUser.agent,
-                model: lastUser.model,
-                auto: true,
-                overflow: !handle.message.finish,
+              return yield* requestCompaction({
+                message: handle.message,
+                model,
+                user: lastUser,
+                footprint: RequestFootprint.withMeasuredInput(footprint, handle.message.tokens),
+                rejected: handle.overflowRejected,
               })
             }
+            compactionStreak = 0
             return "continue" as const
           }).pipe(
             Effect.ensuring(instruction.clear(handle.message.id)),

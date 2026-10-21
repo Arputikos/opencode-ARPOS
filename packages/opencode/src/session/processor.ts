@@ -31,6 +31,16 @@ export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
   readonly message: SessionV1.Assistant
+  /**
+   * ARPOS: true when the LAST step ended because the provider refused the
+   * request as too large (`ContextOverflowError`), as opposed to our own token
+   * accounting deciding a compaction is due. Both make `process()` return
+   * `"compact"`, but they mean opposite things: pre-emptive compaction always
+   * shrinks the next request, while a provider rejection means the request that
+   * was sent did not fit — and if the excess is not in the conversation,
+   * compacting changes nothing. The caller needs the distinction to stop looping.
+   */
+  readonly overflowRejected: boolean
   readonly updateToolCall: (
     toolCallID: string,
     update: (part: SessionV1.ToolPart) => SessionV1.ToolPart,
@@ -80,6 +90,7 @@ interface ProcessorContext extends Input {
   snapshot: string | undefined
   blocked: boolean
   needsCompaction: boolean
+  overflowRejected: boolean
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
 }
@@ -120,6 +131,7 @@ const layer = Layer.effect(
         snapshot: initialSnapshot,
         blocked: false,
         needsCompaction: false,
+        overflowRejected: false,
         currentText: undefined,
         reasoningMap: {},
       }
@@ -650,6 +662,7 @@ const layer = Layer.effect(
             return
           }
           ctx.needsCompaction = true
+          ctx.overflowRejected = true
           yield* events.publish(Session.Event.Error, { sessionID: ctx.sessionID, error })
           return
         }
@@ -667,6 +680,7 @@ const layer = Layer.effect(
           messageID: input.assistantMessage.id,
         })
         ctx.needsCompaction = false
+        ctx.overflowRejected = false
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
 
         return yield* Effect.gen(function* () {
@@ -741,6 +755,9 @@ const layer = Layer.effect(
       return {
         get message() {
           return ctx.assistantMessage
+        },
+        get overflowRejected() {
+          return ctx.overflowRejected
         },
         updateToolCall,
         completeToolCall,

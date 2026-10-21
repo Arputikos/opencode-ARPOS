@@ -42,7 +42,10 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
   model: Provider.Model
   session: Session.Info
-  processor: Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
+  processor: Pick<
+    SessionProcessor.Handle,
+    "message" | "updateToolCall" | "completeToolCall" | "startToolCall" | "toolStartedAt"
+  >
   bypassAgentCheck: boolean
   messages: SessionV1.WithParts[]
   promptOps: TaskPromptOps
@@ -74,7 +77,12 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             metadata: val.metadata,
             status: "running",
             input: args,
-            time: match.state.status === "running" ? match.state.time : { start: Date.now() },
+            // ARPOS: never re-stamped on a metadata update — bash streams its output through here.
+            time: {
+              start:
+                input.processor.toolStartedAt(options.toolCallId) ??
+                (match.state.status === "running" ? match.state.time.start : Date.now()),
+            },
           },
         }
       }),
@@ -102,6 +110,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       execute(args, options) {
         return run.promise(
           Effect.gen(function* () {
+            yield* input.processor.startToolCall(options.toolCallId)
             const ctx = context(args, options)
             yield* plugin.trigger(
               "tool.execute.before",
@@ -155,6 +164,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       execute(args, opts) {
         return run.promise(
           Effect.gen(function* () {
+            yield* input.processor.startToolCall(opts.toolCallId)
             const parsed = parseListMcpResourcesArgs(args)
             const ctx = context(toRecord(args), opts)
             const clients = yield* mcp.clients()
@@ -238,6 +248,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       execute(args, opts) {
         return run.promise(
           Effect.gen(function* () {
+            yield* input.processor.startToolCall(opts.toolCallId)
             const parsed = parseListMcpResourcesArgs(args)
             const ctx = context(toRecord(args), opts)
             const clients = yield* mcp.clients()
@@ -325,6 +336,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       execute(args, opts) {
         return run.promise(
           Effect.gen(function* () {
+            yield* input.processor.startToolCall(opts.toolCallId)
             const parsed = parseReadMcpResourceArgs(args)
             const ctx = context(toRecord(args), opts)
             const clients = yield* mcp.clients()
@@ -398,6 +410,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     item.execute = (args, opts) =>
       run.promise(
         Effect.gen(function* () {
+          yield* input.processor.startToolCall(opts.toolCallId)
           const ctx = context(args, opts)
           yield* plugin.trigger(
             "tool.execute.before",

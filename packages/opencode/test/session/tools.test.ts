@@ -133,7 +133,12 @@ it.effect("preserves running tool start time across metadata updates", () =>
           return state
         }),
       completeToolCall: () => Effect.void,
-    } satisfies Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
+      startToolCall: () => Effect.void,
+      toolStartedAt: () => undefined,
+    } satisfies Pick<
+      SessionProcessor.Handle,
+      "message" | "updateToolCall" | "completeToolCall" | "startToolCall" | "toolStartedAt"
+    >
 
     const tools = yield* SessionTools.resolve({
       agent,
@@ -163,5 +168,78 @@ it.effect("preserves running tool start time across metadata updates", () =>
     if (state.state.status === "running") {
       expect(state.state.time.start).toBe(100)
     }
+  }),
+)
+
+it.effect("stamps a pending tool with the moment its execute began", () =>
+  Effect.gen(function* () {
+    const state: SessionV1.ToolPart = {
+      id: partID,
+      sessionID,
+      messageID,
+      type: "tool",
+      tool: "timing",
+      callID,
+      state: { status: "pending", input: {}, raw: "" },
+    }
+    const updates: number[] = []
+    let started: number | undefined
+    const processor = {
+      message: {
+        id: messageID,
+        sessionID,
+        role: "assistant",
+        parentID: MessageID.ascending(),
+        agent: "build",
+        mode: "build",
+        path: { cwd: "/tmp", root: "/tmp" },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ModelV2.ID.make("test-model"),
+        providerID: ProviderV2.ID.make("test"),
+        time: { created: 1 },
+      } satisfies SessionV1.Assistant,
+      updateToolCall: (_toolCallID, update) =>
+        Effect.sync(() => {
+          const next = update(state)
+          state.state = next.state
+          if (state.state.status === "running") updates.push(state.state.time.start)
+          return state
+        }),
+      completeToolCall: () => Effect.void,
+      startToolCall: () =>
+        Effect.sync(() => {
+          started = 42
+        }),
+      toolStartedAt: () => started,
+    } satisfies Pick<
+      SessionProcessor.Handle,
+      "message" | "updateToolCall" | "completeToolCall" | "startToolCall" | "toolStartedAt"
+    >
+
+    const tools = yield* SessionTools.resolve({
+      agent,
+      model,
+      session: { id: sessionID, permission: [] } as unknown as Session.Info,
+      processor,
+      bypassAgentCheck: false,
+      messages: [],
+      promptOps: {} as never,
+    })
+    const execute = tools.timing.execute
+    if (!execute) throw new Error("timing tool is missing execute")
+
+    yield* Effect.promise(() =>
+      execute(
+        {},
+        {
+          toolCallId: callID,
+          abortSignal: new AbortController().signal,
+          messages: [],
+        },
+      ),
+    )
+
+    expect(updates).toEqual([42, 42])
   }),
 )

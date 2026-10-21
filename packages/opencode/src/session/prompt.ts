@@ -1202,6 +1202,12 @@ const layer = Layer.effect(
         model,
         processor: {
           message: last.info,
+          // The orphan's start was stamped before the restart; keep it.
+          startToolCall: () => Effect.void,
+          toolStartedAt: (callID) => {
+            const part = parts.get(callID)
+            return part ? startOf(part) : undefined
+          },
           updateToolCall: (callID, update) => {
             const part = parts.get(callID)
             return part ? write(update(part)) : Effect.succeed(undefined)

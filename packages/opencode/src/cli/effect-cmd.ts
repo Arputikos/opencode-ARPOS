@@ -17,6 +17,8 @@ export class CliError extends Schema.TaggedErrorClass<CliError>()("CliError", {
 
 export const fail = (message: string, exitCode = 1) => Effect.fail(new CliError({ message, exitCode }))
 
+const DISPOSE_GRACE_MS = 5_000
+
 interface EffectCmdOpts<Args, A> {
   command: string | readonly string[]
   aliases?: string | readonly string[]
@@ -90,7 +92,13 @@ export const effectCmd = <Args, A>(opts: EffectCmdOpts<Args, A>) =>
       try {
         await AppRuntime.runPromise(opts.handler(args).pipe(Effect.provideService(InstanceRef, ctx)))
       } finally {
-        await AppRuntime.runPromise(store.dispose(ctx))
+        // ARPOS: the command's work is done here; `src/index.ts` exits the process right after.
+        // Disposal can hang (seen with `run` when other OpenCode processes run alongside), which
+        // left a finished `opencode run` alive forever — so it gets a bounded grace period.
+        await Promise.race([
+          AppRuntime.runPromise(store.dispose(ctx)),
+          new Promise<void>((resolve) => setTimeout(resolve, DISPOSE_GRACE_MS).unref()),
+        ])
       }
     },
   })

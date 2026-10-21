@@ -81,6 +81,80 @@ IMPORTANT:
 
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
 
+/**
+ * ARPOS: what the ARPOS orchestrator says about a submitted structured answer.
+ * `text` is written for the MODEL to read, not for a log. `terminal`: no further
+ * submission can change the outcome (the corrective budget is spent, the tool is
+ * capped, nothing validates answers here) — the turn must end, and the
+ * orchestrator decides how it ended.
+ */
+export interface StructuredSubmitResult {
+  accepted: boolean
+  terminal: boolean
+  text: string
+}
+
+/**
+ * ARPOS: hand the model's structured answer to the orchestrator and return its
+ * verdict.
+ *
+ * The orchestrator owns the schema, the validation, the corrective-retry budget
+ * and the transcript stamp for BOTH ARPOS engines, so this fork only relays.
+ * It is the same endpoint the Claude Code MCP tool posts to, which is what makes
+ * one `output_schema` behave identically on either engine.
+ *
+ * Fail-CLOSED on purpose: no orchestrator in the environment, or an unreachable
+ * one, produces a rejection the model can see rather than a silent "accepted"
+ * that nothing ever validated.
+ */
+async function reportStructuredOutput(sessionID: string, args: unknown): Promise<StructuredSubmitResult> {
+  const baseUrl = process.env["ARPOS_ORCHESTRATOR_URL"]
+  const apiKey = process.env["ARPOS_ORCHESTRATOR_API_KEY"]
+  if (!baseUrl || !apiKey) {
+    return {
+      accepted: false,
+      terminal: true,
+      text:
+        "Structured output could not be delivered: this OpenCode server is not connected to an ARPOS " +
+        "orchestrator, so the answer cannot be validated. Stop calling StructuredOutput and end your turn.",
+    }
+  }
+  try {
+    const resp = await fetch(`${baseUrl}/api/plugin-structured-output`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ engineSessionId: sessionID, output: args }),
+      signal: AbortSignal.timeout(60_000),
+    })
+    if (!resp.ok) {
+      // A 4xx will not change on a retry (unknown session, refused token); a 5xx may.
+      const terminal = resp.status < 500
+      return {
+        accepted: false,
+        terminal,
+        text: terminal
+          ? `Structured output could not be validated (orchestrator returned ${resp.status}). Stop calling StructuredOutput and end your turn.`
+          : `Structured output could not be validated (orchestrator returned ${resp.status}). Try calling StructuredOutput again.`,
+      }
+    }
+    const result = (await resp.json()) as { ok?: unknown; terminal?: unknown; text?: unknown }
+    if (typeof result.text !== "string") {
+      return {
+        accepted: false,
+        terminal: false,
+        text: "Structured output could not be validated: malformed orchestrator response.",
+      }
+    }
+    return { accepted: result.ok === true, terminal: result.terminal === true, text: result.text }
+  } catch (e) {
+    return {
+      accepted: false,
+      terminal: false,
+      text: `Structured output could not be delivered to the orchestrator: ${e instanceof Error ? e.message : String(e)}. Try calling StructuredOutput again.`,
+    }
+  }
+}
+
 function mcpResourceBase64Size(value: string) {
   const trimmed = value.replace(/\s/g, "")
   const padding = trimmed.endsWith("==") ? 2 : trimmed.endsWith("=") ? 1 : 0
@@ -1218,7 +1292,13 @@ const layer = Layer.effect(
     const runLoop: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
       function* (sessionID: SessionID) {
         const ctx = yield* InstanceState.context
-        let structured: unknown
+        // ARPOS: the orchestrator's verdict ended this turn's structured answer —
+        // accepted, or terminally refused (budget spent, tool capped). Stopping
+        // the loop is the only thing the fork still does with the verdict:
+        // `toolChoice: "required"` makes the model call SOMETHING on every step,
+        // so without a break it would keep calling the tool after the answer was
+        // delivered — or, after a terminal refusal, forever.
+        let structuredDone = false
         let step = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
@@ -1388,8 +1468,9 @@ const layer = Layer.effect(
             if (lastUser.format?.type === "json_schema") {
               tools["StructuredOutput"] = createStructuredOutputTool({
                 schema: lastUser.format.schema,
-                onSuccess(output) {
-                  structured = output
+                submit: (args) => reportStructuredOutput(sessionID, args),
+                onTurnOver() {
+                  structuredDone = true
                 },
               })
             }
@@ -1430,8 +1511,12 @@ const layer = Layer.effect(
               toolChoice: format.type === "json_schema" ? "required" : undefined,
             })
 
-            if (structured !== undefined) {
-              handle.message.structured = structured
+            // ARPOS: the structured answer is settled — accepted, or refused for
+            // good — so this turn is done. Nothing is written onto the message
+            // here: the orchestrator's end-of-turn gate stamps the validated
+            // object (or fails the turn with a StructuredOutputError) itself, so
+            // a Claude Code session and an OpenCode session carry the same fields.
+            if (structuredDone) {
               handle.message.finish = handle.message.finish ?? "stop"
               yield* sessions.updateMessage(handle.message)
               return "break" as const
@@ -1449,14 +1534,6 @@ const layer = Layer.effect(
                 }).toObject()
                 yield* sessions.updateMessage(handle.message)
                 yield* events.publish(Session.Event.Error, { sessionID, error: handle.message.error })
-                return "break" as const
-              }
-              if (format.type === "json_schema") {
-                handle.message.error = new SessionV1.StructuredOutputError({
-                  message: "Model did not produce structured output",
-                  retries: 0,
-                }).toObject()
-                yield* sessions.updateMessage(handle.message)
                 return "break" as const
               }
             }
@@ -1706,10 +1783,26 @@ export const CommandInput = Schema.Struct({
 })
 export type CommandInput = Schema.Schema.Type<typeof CommandInput>
 
-/** @internal Exported for testing */
+/**
+ * ARPOS: the structured-output tool is a PASS-THROUGH.
+ *
+ * Validation and the corrective-retry budget live in the ARPOS orchestrator,
+ * the single authority for structured output across both of its engines — so an
+ * `output_schema` behaves identically on OpenCode and on Claude Code (which
+ * reaches the same endpoint through an MCP tool). What stays here is the one
+ * thing only the fork can do: hand the model the caller's REAL JSON Schema as
+ * the tool's input schema, via the pass-through `jsonSchema()`.
+ *
+ * `submit` returns the text the orchestrator wants the model to read — the
+ * success line, a corrective error list, or a terminal refusal — whether the
+ * answer was accepted, and whether the turn is over either way (`onTurnOver`).
+ *
+ * @internal Exported for testing
+ */
 export function createStructuredOutputTool(input: {
   schema: Record<string, any>
-  onSuccess: (output: unknown) => void
+  submit: (args: unknown) => Promise<StructuredSubmitResult>
+  onTurnOver: () => void
 }): AITool {
   // Remove $schema property if present (not needed for tool input)
   const { $schema: _, ...toolSchema } = input.schema
@@ -1718,12 +1811,12 @@ export function createStructuredOutputTool(input: {
     description: STRUCTURED_OUTPUT_DESCRIPTION,
     inputSchema: jsonSchema(toolSchema as JSONSchema7),
     async execute(args) {
-      // AI SDK validates args against inputSchema before calling execute()
-      input.onSuccess(args)
+      const verdict = await input.submit(args)
+      if (verdict.accepted || verdict.terminal) input.onTurnOver()
       return {
-        output: "Structured output captured successfully.",
-        title: "Structured Output",
-        metadata: { valid: true },
+        output: verdict.text,
+        title: verdict.accepted ? "Structured Output" : "Structured Output (rejected)",
+        metadata: { valid: verdict.accepted },
       }
     },
     toModelOutput({ output }) {

@@ -10,6 +10,22 @@ const decodeUser = Schema.decodeUnknownExit(SessionV1.User)
 const decodeAssistant = Schema.decodeUnknownExit(SessionV1.Assistant)
 
 describe("structured-output.OutputFormat", () => {
+  test("encodes a format read back from storage as a plain object", () => {
+    // ARPOS: a user message's `format` comes from SQLite as plain JSON; the
+    // message list encodes it — a Schema.Class here made that a 400.
+    const encode = Schema.encodeUnknownExit(SessionV1.User)
+    const stored = {
+      id: MessageID.make("msg_123"),
+      sessionID: SessionID.make("ses_123"),
+      role: "user",
+      time: { created: Date.now() },
+      agent: "default",
+      model: { providerID: "anthropic", modelID: "claude-3" },
+      format: { type: "json_schema", schema: { type: "object" }, retryCount: 3 },
+    }
+    expect(Exit.isSuccess(encode(stored))).toBe(true)
+  })
+
   test("parses text format", () => {
     const result = decodeFormat({ type: "text" })
     expect(Exit.isSuccess(result)).toBe(true)

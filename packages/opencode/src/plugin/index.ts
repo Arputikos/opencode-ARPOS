@@ -67,9 +67,14 @@ export function experimentalWebSocketsEnabled(input: { enabled: boolean; channel
 function internalPlugins(flags: RuntimeFlags.Info): PluginInstance[] {
   return [
     // Temporary rollout: pre-release builds use WebSockets by default; releases require explicit opt-in.
+    // ARPOS: runs a release tag from source, where the channel reads "local" (pre-release) — so
+    // the experimental OpenAI WebSocket transport stays opt-in, as it is in the release build.
     (input) =>
       CodexAuthPlugin(input, {
-        experimentalWebSockets: experimentalWebSocketsEnabled({ enabled: flags.experimentalWebSockets }),
+        experimentalWebSockets: experimentalWebSocketsEnabled({
+          enabled: flags.experimentalWebSockets,
+          channel: "latest",
+        }),
       }),
     CopilotAuthPlugin,
     ModalPlugin,

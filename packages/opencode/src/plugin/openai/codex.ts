@@ -15,6 +15,15 @@ const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
 const ALLOWED_MODELS = new Set(["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-6-sol", "gpt-6-luna"])
 const DISALLOWED_MODELS = new Set(["gpt-5.5-pro"])
 
+/** `gpt-5.5` and every later generation (`gpt-5.10`, `gpt-6-*`), compared numerically. */
+function isGpt55OrLater(id: string) {
+  const match = id.match(/^gpt-(\d+)(?:\.(\d+))?/)
+  if (!match) return false
+  const major = Number(match[1])
+  const minor = Number(match[2] ?? 0)
+  return major > 5 || (major === 5 && minor > 4)
+}
+
 interface PkceCodes {
   verifier: string
   challenge: string
@@ -297,11 +306,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
               if (ALLOWED_MODELS.has(model.api.id)) return true
               if (DISALLOWED_MODELS.has(model.api.id)) return false
               if (model.api.id === "gpt-5.6") return false
-              const match = model.api.id.match(/^gpt-(\d+)(?:\.(\d+))?/)
-              if (!match) return false
-              const major = Number(match[1])
-              const minor = Number(match[2] ?? 0)
-              return major > 5 || (major === 5 && minor > 4)
+              return isGpt55OrLater(model.api.id)
             })
             .map(([modelID, model]) => [
               modelID,
@@ -312,14 +317,16 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
                   output: 0,
                   cache: { read: 0, write: 0 },
                 },
-                limit:
-                  model.id.includes("gpt-5.5") || model.id.includes("gpt-5.6")
-                    ? {
-                        context: 400_000,
-                        input: 272_000,
-                        output: 128_000,
-                      }
-                    : model.limit,
+                // ARPOS: models.dev lists the public API window (e.g. 1.05M for
+                // gpt-6-luna); Codex grants every generation from 5.5 on the same
+                // 400k/272k as gpt-5.6 (codex-rs models.json), gpt-6-* included.
+                limit: isGpt55OrLater(model.id)
+                  ? {
+                      context: 400_000,
+                      input: 272_000,
+                      output: 128_000,
+                    }
+                  : model.limit,
               },
             ]),
         )

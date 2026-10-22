@@ -1871,6 +1871,142 @@ unix(
   30_000,
 )
 
+// ARPOS: a bash call left running by a killed server, under a user message
+// pinned to a model that no longer exists (the operator switched the agent).
+const seedOrphans = Effect.fn("test.seedOrphans")(function* (sessionID: SessionID, commands: string[]) {
+  const session = yield* Session.Service
+  const stale = { providerID: ProviderV2.ID.make("gone"), modelID: ModelV2.ID.make("gone-model") }
+  const msg = yield* session.updateMessage({
+    id: MessageID.ascending(),
+    role: "user",
+    sessionID,
+    agent: "build",
+    model: stale,
+    time: { created: Date.now() },
+  })
+  yield* session.updatePart({ id: PartID.ascending(), messageID: msg.id, sessionID, type: "text", text: "run it" })
+  const assistant = yield* session.updateMessage({
+    id: MessageID.ascending(),
+    role: "assistant",
+    parentID: msg.id,
+    sessionID,
+    mode: "build",
+    agent: "build",
+    cost: 0,
+    path: { cwd: "/tmp", root: "/tmp" },
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    ...stale,
+    time: { created: Date.now() },
+  })
+  for (const [index, command] of commands.entries()) {
+    yield* session.updatePart({
+      id: PartID.ascending(),
+      messageID: assistant.id,
+      sessionID,
+      type: "tool",
+      callID: `call_orphan_${index}`,
+      tool: "bash",
+      state: { status: "running", input: { command, description: "orphan" }, time: { start: Date.now() } },
+    })
+  }
+})
+
+const orphanParts = Effect.fn("test.orphanParts")(function* (sessionID: SessionID) {
+  const msgs = yield* (yield* Session.Service).messages({ sessionID })
+  return msgs
+    .flatMap((m) => m.parts)
+    .filter((p): p is SessionV1.ToolPart => p.type === "tool" && p.callID.startsWith("call_orphan_"))
+})
+
+unix(
+  "resume re-drives an orphaned tool on the current model",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), model: "test/test-model" }))
+      const { prompt, chat } = yield* boot()
+      yield* llm.text("done")
+      yield* seedOrphans(chat.id, ["printf ORPHAN; printf _RAN"])
+
+      yield* prompt.loop({ sessionID: chat.id })
+
+      const [part] = yield* orphanParts(chat.id)
+      expect(part.state.status).toBe("completed")
+      if (part.state.status === "completed") expect(part.state.output).toContain("ORPHAN_RAN")
+    }),
+  30_000,
+)
+
+unix(
+  "cancel aborts a re-driven orphaned tool and closes it",
+  () =>
+    Effect.gen(function* () {
+      const { dir } = yield* useServerConfig((url) => ({ ...providerCfg(url), model: "test/test-model" }))
+      const { prompt, chat } = yield* boot()
+      const first = path.join(dir, "first-finished")
+      const second = path.join(dir, "second-ran")
+      yield* seedOrphans(chat.id, [`sleep 2 && touch "${first}"`, `touch "${second}"`])
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* Effect.sleep("800 millis")
+      yield* prompt.cancel(chat.id)
+      yield* Fiber.await(fiber)
+      yield* Effect.sleep("3 seconds")
+
+      expect(yield* Effect.promise(() => Bun.file(first).exists())).toBe(false)
+      expect(yield* Effect.promise(() => Bun.file(second).exists())).toBe(false)
+      const [running, queued] = yield* orphanParts(chat.id)
+      expect(running.state.status === "completed" && running.state.output).toContain("User aborted the command")
+      expect(queued.state.status === "error" && queued.state.error).toBe("Tool execution aborted")
+    }),
+  30_000,
+)
+
+// ARPOS (patch 17): `!`…`` blocks run outside the bash tool and its permission,
+// so only the command's own template expands them, and only for an agent whose
+// bash is unrestricted.
+const shellProbe = (permission?: ConfigV1.Info["permission"]) =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      ...(permission ? { permission } : {}),
+      command: { probe: { template: "Own: !`printf OWN; printf _RAN` Args: $ARGUMENTS" } },
+    }))
+    const { prompt, chat } = yield* boot()
+    yield* llm.text("done")
+    yield* prompt.command({ sessionID: chat.id, command: "probe", arguments: "!`printf ARG; printf _RAN`" })
+    return JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+  })
+
+unix(
+  "command ! expansion leaves a block in the arguments as text",
+  () =>
+    withSh(() =>
+      Effect.gen(function* () {
+        const sent = yield* shellProbe()
+        expect(sent).toContain("OWN_RAN")
+        expect(sent).toContain("!`printf ARG; printf _RAN`")
+        expect(sent).not.toContain("ARG_RAN")
+      }),
+    ),
+  30_000,
+)
+
+for (const bash of ["deny", "ask", { "*": "allow", "rm *": "deny" }] as const) {
+  unix(
+    `command ! expansion leaves blocks as text when bash is ${JSON.stringify(bash)}`,
+    () =>
+      withSh(() =>
+        Effect.gen(function* () {
+          const sent = yield* shellProbe({ bash })
+          expect(sent).toContain("!`printf OWN; printf _RAN`")
+          expect(sent).not.toContain("OWN_RAN")
+          expect(sent).not.toContain("ARG_RAN")
+        }),
+      ),
+    30_000,
+  )
+}
+
 unixNoLLMServer(
   "cancel interrupts shell and resolves cleanly",
   () =>

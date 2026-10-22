@@ -856,6 +856,16 @@ const layer = Layer.effect(
       return yield* provider.defaultModel().pipe(Effect.orDie)
     })
 
+    // ARPOS: the model a turn SHOULD run on — the agent's own model if it has
+    // one, else the global default (`opencode.json` `model`, which ARPOS
+    // rewrites on every spawn). The pinned model of the user message (and the
+    // session's stored model) goes stale when the operator changes the agent's
+    // model mid-session; without this, continuing or resuming the turn re-runs
+    // on the old model ("Model not found"). In memory only.
+    const turnModel = Effect.fnUntraced(function* (agent: Agent.Info | undefined) {
+      return agent?.model ?? (yield* provider.defaultModel().pipe(Effect.orDie))
+    })
+
     const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
       const agentName = input.agent
       const ag = agentName ? yield* agents.get(agentName) : yield* agents.defaultInfo()
@@ -1330,7 +1340,8 @@ const layer = Layer.effect(
       if (!lastUser || lastUser.role !== "user") return
       const agent = yield* agents.get(lastUser.agent)
       if (!agent) return
-      const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+      const target = yield* turnModel(agent)
+      const model = yield* getModel(target.providerID, target.modelID, sessionID)
       const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
       yield* Effect.logInfo("resumeOrphanTools", { "session.id": sessionID, count: orphans.length })
 
@@ -1388,61 +1399,81 @@ const layer = Layer.effect(
         Effect.provideService(RuntimeFlags.Service, flags),
       )
 
-      for (const orphan of orphans) {
-        const input = orphan.state.input
-        const start = startOf(orphan)
-        const execute = tools[orphan.tool]?.execute
-        if (!execute) {
-          yield* Effect.logWarning("resumeOrphanTools.missing_tool", { "session.id": sessionID, tool: orphan.tool })
+      const drive = Effect.fnUntraced(function* () {
+        for (const orphan of orphans) {
+          const input = orphan.state.input
+          const start = startOf(orphan)
+          const execute = tools[orphan.tool]?.execute
+          if (!execute) {
+            yield* Effect.logWarning("resumeOrphanTools.missing_tool", { "session.id": sessionID, tool: orphan.tool })
+            yield* settle(orphan.callID, {
+              status: "error",
+              input,
+              error: `Tool "${orphan.tool}" is not available after server restart`,
+              time: { start, end: Date.now() },
+            })
+            continue
+          }
+          yield* settle(orphan.callID, { status: "running", input, time: { start } })
+          const exit = yield* Effect.promise(
+            (abortSignal) =>
+              Promise.resolve(
+                execute(input, {
+                  toolCallId: orphan.callID,
+                  abortSignal,
+                  messages: [],
+                }),
+              ) as Promise<Omit<Tool.ExecuteResult, "attachments"> & { attachments?: SessionV1.FilePart[] }>,
+          ).pipe(Effect.exit)
+          const current = parts.get(orphan.callID)!
+          const metadata = "metadata" in current.state ? (current.state.metadata ?? {}) : {}
+          if (Exit.isSuccess(exit)) {
+            yield* settle(orphan.callID, {
+              status: "completed",
+              input,
+              output: exit.value.output,
+              metadata: exit.value.metadata,
+              title: exit.value.title,
+              time: { start, end: Date.now() },
+              attachments: exit.value.attachments,
+            })
+            continue
+          }
+          const err = Cause.squash(exit.cause)
+          const message = err instanceof Error ? err.message : String(err)
+          yield* Effect.logWarning("resumeOrphanTools.execute_failed", {
+            "session.id": sessionID,
+            tool: orphan.tool,
+            callID: orphan.callID,
+            error: message,
+          })
           yield* settle(orphan.callID, {
             status: "error",
             input,
-            error: `Tool "${orphan.tool}" is not available after server restart`,
+            error: message,
+            metadata,
             time: { start, end: Date.now() },
           })
-          continue
         }
-        yield* settle(orphan.callID, { status: "running", input, time: { start } })
-        const exit = yield* Effect.promise(
-          () =>
-            Promise.resolve(
-              execute(input, {
-                toolCallId: orphan.callID,
-                abortSignal: new AbortController().signal,
-                messages: [],
+      })
+      // Aborted (not killed): close what is still open, as the processor does, so
+      // the next turn does not re-drive a call the operator stopped.
+      yield* drive().pipe(
+        Effect.onInterrupt(() =>
+          Effect.forEach(
+            [...parts.values()].filter((part) => part.state.status === "pending" || part.state.status === "running"),
+            (part) =>
+              settle(part.callID, {
+                status: "error",
+                input: part.state.input,
+                error: "Tool execution aborted",
+                metadata: { ...("metadata" in part.state ? part.state.metadata : {}), interrupted: true },
+                time: { start: startOf(part), end: Date.now() },
               }),
-            ) as Promise<Omit<Tool.ExecuteResult, "attachments"> & { attachments?: SessionV1.FilePart[] }>,
-        ).pipe(Effect.exit)
-        const current = parts.get(orphan.callID)!
-        const metadata = "metadata" in current.state ? (current.state.metadata ?? {}) : {}
-        if (Exit.isSuccess(exit)) {
-          yield* settle(orphan.callID, {
-            status: "completed",
-            input,
-            output: exit.value.output,
-            metadata: exit.value.metadata,
-            title: exit.value.title,
-            time: { start, end: Date.now() },
-            attachments: exit.value.attachments,
-          })
-          continue
-        }
-        const err = Cause.squash(exit.cause)
-        const message = err instanceof Error ? err.message : String(err)
-        yield* Effect.logWarning("resumeOrphanTools.execute_failed", {
-          "session.id": sessionID,
-          tool: orphan.tool,
-          callID: orphan.callID,
-          error: message,
-        })
-        yield* settle(orphan.callID, {
-          status: "error",
-          input,
-          error: message,
-          metadata,
-          time: { start, end: Date.now() },
-        })
-      }
+            { discard: true },
+          ),
+        ),
+      )
     })
 
     const runLoop: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
@@ -1547,14 +1578,7 @@ const layer = Layer.effect(
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
 
-          // ARPOS: the model this turn SHOULD run on — the agent's own model if
-          // it has one, else the global default (`opencode.json` `model`, which
-          // ARPOS rewrites on every spawn). The pinned model of the user message
-          // (and the session's stored model) goes stale when the operator changes
-          // the agent's model mid-session; without this, continuing or resuming
-          // the turn re-runs on the old model ("Model not found"). In memory only.
-          const target =
-            (yield* agents.get(lastUser.agent))?.model ?? (yield* provider.defaultModel().pipe(Effect.orDie))
+          const target = yield* turnModel(yield* agents.get(lastUser.agent))
 
           // ARPOS: drop a compaction queued under a model that is no longer the
           // one running — carrier message and all (see

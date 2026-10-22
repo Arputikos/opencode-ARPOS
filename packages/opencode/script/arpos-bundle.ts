@@ -24,4 +24,7 @@ if (!result.success) {
   for (const log of result.logs) console.error(log)
   process.exit(1)
 }
+// The launcher points bun's --config here: the server starts in the agent's desk, and
+// bun would otherwise read a bunfig.toml (preload = code in this process) from there.
+await Bun.write("./dist/arpos-server/bunfig.toml", "")
 console.log(`built ${result.outputs.length} files into dist/arpos-server`)

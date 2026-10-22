@@ -97,7 +97,7 @@ export const effectCmd = <Args, A>(opts: EffectCmdOpts<Args, A>) =>
         // left a finished `opencode run` alive forever — so it gets a bounded grace period.
         await Promise.race([
           AppRuntime.runPromise(store.dispose(ctx)),
-          new Promise<void>((resolve) => setTimeout(resolve, DISPOSE_GRACE_MS).unref()),
+          new Promise<void>((resolve) => setTimeout(resolve, DISPOSE_GRACE_MS)),
         ])
       }
     },

@@ -83,8 +83,12 @@ function selectedV2WorkspaceID(
   return workspaceID.value
 }
 
+function requestedDirectory(request: HttpServerRequest.HttpServerRequest, url: URL): string | undefined {
+  return url.searchParams.get("directory") || request.headers["x-opencode-directory"] || undefined
+}
+
 function defaultDirectory(request: HttpServerRequest.HttpServerRequest, url: URL): string {
-  return url.searchParams.get("directory") || request.headers["x-opencode-directory"] || process.cwd()
+  return requestedDirectory(request, url) || process.cwd()
 }
 
 function shouldStayOnControlPlane(request: HttpServerRequest.HttpServerRequest, url: URL): boolean {
@@ -178,8 +182,13 @@ function planRequest(
       return yield* planWorkspaceRequest(request, url, workspace)
     }
 
+    // ARPOS: a directory the request names wins over the one persisted on the session, as up to
+    // v1.4.6. The orchestrator always names the agent's desk, and the librarian continues one
+    // conversation in a snapshot (read) and in the work tree (write): routing to the persisted
+    // directory ran the turn — and published its events — in another instance than the caller
+    // listens to, so `opencode run` never saw the turn end.
     return RequestPlan.Local({
-      directory: session?.directory || defaultDirectory(request, url),
+      directory: requestedDirectory(request, url) || session?.directory || process.cwd(),
       workspaceID: envWorkspaceID ?? workspaceID,
     })
   })

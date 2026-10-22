@@ -388,7 +388,8 @@ describe("session HttpApi", () => {
     { git: true, config: { formatter: false, lsp: false } },
   )
 
-  it.live("uses the persisted session directory for prompt requests", () =>
+  // ARPOS: a directory the request names wins over the persisted one (see workspace-routing.ts).
+  it.live("uses the requested directory over the persisted session directory for prompt requests", () =>
     Effect.gen(function* () {
       const llm = yield* TestLLMServer
       yield* llm.text("ok", { usage: { input: 1, output: 1 } })
@@ -421,8 +422,8 @@ describe("session HttpApi", () => {
         .pipe(provideInstanceEffect(sessionDirectory), Effect.orDie)
       const assistant = messages.find((message) => message.info.role === "assistant")
       expect(assistant?.info.role === "assistant" ? assistant.info.path : undefined).toEqual({
-        cwd: sessionDirectory,
-        root: sessionDirectory,
+        cwd: requestDirectory,
+        root: requestDirectory,
       })
     }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
   )

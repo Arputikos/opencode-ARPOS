@@ -21,6 +21,8 @@ import { SessionID, MessageID } from "../../src/session/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Permission } from "@/permission"
 import { LLMAISDK } from "@/session/llm/ai-sdk"
+import { LLMRequestPrep } from "@/session/llm/request"
+import { createStructuredOutputTool } from "@/session/prompt"
 import { Session as SessionNs } from "@/session/session"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -1417,6 +1419,71 @@ describe("session.llm.stream", () => {
 
         const maxTokens = body.max_output_tokens as number | undefined
         expect(maxTokens).toBe(undefined) // match codex cli behavior
+      }),
+    { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
+  )
+
+  // ARPOS: upstream sends every OpenAI tool with `strict: false`; the structured-output
+  // tool keeps the provider's default, so OpenAI holds the answer to the caller's schema.
+  it.instance(
+    "keeps the provider's strict default for the structured-output tool only",
+    () =>
+      Effect.gen(function* () {
+        const model = loadFixture("openai", "gpt-5.2").model
+        const request = waitRequest(
+          "/responses",
+          createEventResponse(
+            [
+              {
+                type: "response.completed",
+                response: { incomplete_details: null, usage: { input_tokens: 1, output_tokens: 1 } },
+              },
+            ],
+            true,
+          ),
+        )
+        const resolved = yield* Provider.use.getModel(ProviderV2.ID.openai, ModelV2.ID.make(model.id))
+        const sessionID = SessionID.make("session-test-structured-strict")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+
+        yield* drain({
+          user: {
+            id: MessageID.make("msg_user-structured-strict"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderV2.ID.make("openai"), modelID: resolved.id },
+          } satisfies SessionV1.User,
+          sessionID,
+          model: resolved,
+          agent,
+          system: [],
+          messages: [{ role: "user", content: "Answer" }],
+          tools: {
+            lookup: tool({
+              description: "Lookup data",
+              inputSchema: z.object({ query: z.string() }),
+              execute: async () => ({ output: "" }),
+            }),
+            [LLMRequestPrep.STRUCTURED_OUTPUT_TOOL]: createStructuredOutputTool({
+              schema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+              submit: async () => ({ accepted: true, terminal: false, text: "" }),
+              onTurnOver: () => {},
+            }),
+          },
+        })
+
+        const tools = (yield* Effect.promise(() => request)).body.tools as Array<Record<string, unknown>>
+        const byName = Object.fromEntries(tools.map((t) => [t.name, t]))
+        expect(byName["lookup"]?.strict).toBe(false)
+        expect(byName[LLMRequestPrep.STRUCTURED_OUTPUT_TOOL]).toBeDefined()
+        expect(byName[LLMRequestPrep.STRUCTURED_OUTPUT_TOOL]).not.toHaveProperty("strict")
       }),
     { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
   )

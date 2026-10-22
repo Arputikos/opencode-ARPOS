@@ -1762,7 +1762,7 @@ const layer = Layer.effect(
             )
 
             if (lastUser.format?.type === "json_schema") {
-              tools["StructuredOutput"] = createStructuredOutputTool({
+              tools[LLMRequestPrep.STRUCTURED_OUTPUT_TOOL] = createStructuredOutputTool({
                 schema: lastUser.format.schema,
                 submit: (args) => reportStructuredOutput(sessionID, args),
                 onTurnOver() {

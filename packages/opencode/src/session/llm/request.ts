@@ -141,12 +141,19 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   // Codex parity: OpenAI Responses-family providers hardcode `strict: false`
   // on every function tool so MCP-sourced and dynamic schemas that don't
   // satisfy OpenAI's structured-outputs constraints still register.
+  // ARPOS: except the structured-output tool, which keeps the provider's default
+  // (strict whenever the caller's schema allows it) — the provider then holds the
+  // answer to the schema, and a schema it cannot satisfy fails at once instead of
+  // through rejected answers. Not `strict: true`: that refuses every schema with an
+  // optional field.
   if (
     input.model.api.npm === "@ai-sdk/openai" ||
     input.model.api.npm === "@ai-sdk/azure" ||
     input.model.api.npm === "@ai-sdk/amazon-bedrock/mantle"
   ) {
-    for (const key of Object.keys(tools)) tools[key] = { ...tools[key], strict: false }
+    for (const key of Object.keys(tools)) {
+      if (key !== STRUCTURED_OUTPUT_TOOL) tools[key] = { ...tools[key], strict: false }
+    }
   }
   if (
     input.model.providerID.includes("github-copilot") &&
@@ -198,6 +205,9 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     },
   }
 })
+
+/** ARPOS: the tool the model answers a `json_schema` turn with (`createStructuredOutputTool`). */
+export const STRUCTURED_OUTPUT_TOOL = "StructuredOutput"
 
 /**
  * The system prompt as sent, before plugins transform it. ARPOS: exported, with

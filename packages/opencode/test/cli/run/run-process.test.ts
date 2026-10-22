@@ -7,6 +7,14 @@ import { describe, expect } from "bun:test"
 import { Effect } from "effect"
 import { reply } from "../../lib/llm-server"
 import { cliIt } from "../../lib/cli-process"
+import { testProviderConfig } from "../../lib/test-provider"
+
+// ARPOS: a turn runs on the agent's or the default model, not the one its message
+// names (`turnModel` in session/prompt.ts) — so an unknown model is set as the default.
+const unknownDefaultModel = (llmUrl: string) => ({
+  model: "test/nonexistent-model",
+  env: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...testProviderConfig(llmUrl), model: "test/nonexistent-model" }) },
+})
 
 describe("opencode run (non-interactive subprocess)", () => {
   // Happy path: prompt completes, output reaches stdout, process exits 0.
@@ -70,10 +78,10 @@ describe("opencode run (non-interactive subprocess)", () => {
   // Keep competing CLI startups out of this wall-clock assertion on busy CI runners.
   cliIt.live(
     "exits nonzero promptly when the model is unknown (regression for #27371)",
-    ({ opencode }) =>
+    ({ llm, opencode }) =>
       Effect.gen(function* () {
         const result = yield* opencode.run("say hi", {
-          model: "test/nonexistent-model",
+          ...unknownDefaultModel(llm.url),
           timeoutMs: 15_000,
         })
         expect(result.exitCode).not.toBe(0)
@@ -144,10 +152,10 @@ describe("opencode run (non-interactive subprocess)", () => {
 
   cliIt.concurrent(
     "--format json emits a pure error record for a rejected prompt request",
-    ({ opencode }) =>
+    ({ llm, opencode }) =>
       Effect.gen(function* () {
         const result = yield* opencode.run("use an unknown model", {
-          model: "test/nonexistent-model",
+          ...unknownDefaultModel(llm.url),
           format: "json",
         })
 

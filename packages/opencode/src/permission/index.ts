@@ -215,7 +215,11 @@ export function disabled(tools: string[], ruleset: PermissionV1.Ruleset): Set<st
   return new Set(
     tools.filter((tool) => {
       const permission = edits.includes(tool) ? "edit" : reads.includes(tool) ? "read" : tool
-      const rule = ruleset.findLast((rule) => Wildcard.matchName(permission, rule.permission))
+      // ARPOS: a rule on the tool's own name counts too, so `read_mcp_resource: deny`
+      // hides that tool without taking the `read` tool with it.
+      const rule = ruleset.findLast(
+        (rule) => Wildcard.matchName(permission, rule.permission) || Wildcard.matchName(tool, rule.permission),
+      )
       return rule?.pattern === "*" && rule.action === "deny"
     }),
   )

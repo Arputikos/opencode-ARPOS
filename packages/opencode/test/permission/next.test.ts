@@ -509,6 +509,23 @@ test("disabled - disables edit/write/apply_patch when edit denied", () => {
   expect(result.has("bash")).toBe(false)
 })
 
+test("disabled - a rule on its own name disables a tool asking under another permission", () => {
+  const tools = ["read", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource", "edit", "write"]
+  const result = Permission.disabled(tools, [
+    { permission: "*", pattern: "*", action: "allow" },
+    { permission: "list_mcp_resources", pattern: "*", action: "deny" },
+    { permission: "list_mcp_resource_templates", pattern: "*", action: "deny" },
+    { permission: "read_mcp_resource", pattern: "*", action: "deny" },
+    { permission: "write", pattern: "*", action: "deny" },
+  ])
+  expect([...result].sort()).toEqual([
+    "list_mcp_resource_templates",
+    "list_mcp_resources",
+    "read_mcp_resource",
+    "write",
+  ])
+})
+
 test("disabled - does not disable when partially denied", () => {
   const result = Permission.disabled(
     ["bash"],

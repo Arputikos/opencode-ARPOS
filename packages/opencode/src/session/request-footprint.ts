@@ -78,7 +78,7 @@ export async function measure(input: {
   const builtinTools: Group = { tools: 0, tokens: 0 }
   const servers = new Map<string, Group>()
   for (const [name, tool] of Object.entries(input.tools)) {
-    const tokens = Token.estimate(await serializeTool(name, tool))
+    const tokens = await toolTokens(name, tool)
     const server = input.serverOf(tool)
     const group = server === undefined ? builtinTools : (servers.get(server) ?? { tools: 0, tokens: 0 })
     group.tools++
@@ -224,10 +224,10 @@ function tools(count: number) {
   return `${count} tool${count === 1 ? "" : "s"}`
 }
 
-/** The tool as the provider receives it: name, description, JSON schema. */
-async function serializeTool(name: string, tool: Tool) {
+/** The tool's definition as the provider receives it (name, description, JSON schema), in tokens. */
+export async function toolTokens(name: string, tool: Tool) {
   const parameters = tool.inputSchema ? await asSchema(tool.inputSchema).jsonSchema : {}
-  return JSON.stringify({ name, description: tool.description ?? "", parameters })
+  return Token.estimate(JSON.stringify({ name, description: tool.description ?? "", parameters }))
 }
 
 // Parts whose payload is binary (images, PDFs, other files). Their base64

@@ -109,14 +109,16 @@ function errorTool(parts: SessionV1.Part[]) {
   return part?.state.status === "error" ? (part as ErrorToolPart) : undefined
 }
 
-function makeMcp(instructions: MCP.ServerInstructions[] = []) {
+type McpFixture = { clients: Record<string, MCP.McpTool["client"]>; tools: Record<string, MCP.McpTool> }
+
+function makeMcp(instructions: MCP.ServerInstructions[] = [], fixture?: McpFixture) {
   return Layer.succeed(
     MCP.Service,
     MCP.Service.of({
       status: () => Effect.succeed({}),
-      clients: () => Effect.succeed({}),
+      clients: () => Effect.succeed(fixture?.clients ?? {}),
       instructions: () => Effect.succeed(instructions),
-      tools: () => Effect.succeed({}),
+      tools: () => Effect.succeed(fixture?.tools ?? {}),
       prompts: () => Effect.succeed({}),
       resources: () => Effect.succeed({}),
       resourceTemplates: () => Effect.succeed({}),
@@ -221,12 +223,12 @@ function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; proces
   return LayerNode.compile(promptRoot, replacements)
 }
 
-function makeHttp(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking" }) {
+function makeHttp(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking"; mcp?: McpFixture }) {
   const root = LayerNode.group([promptRoot, testLLMServerNode])
   const replacements = [
     [SessionSummary.node, summary],
     [LSP.node, lsp],
-    [MCP.node, makeMcp(input?.mcpInstructions)],
+    [MCP.node, makeMcp(input?.mcpInstructions, input?.mcp)],
     [RuntimeFlags.node, runtimeFlags],
   ] as const
   if (input?.processor === "blocking") {
@@ -847,6 +849,123 @@ it.instance("loop continues when finish is tool-calls", () =>
       expect(result.parts.some((part) => part.type === "text" && part.text === "second")).toBe(true)
       expect(result.info.finish).toBe("stop")
     }
+  }),
+)
+
+// ARPOS (patch 27): an MCP server whose tools weigh ~6k tokens each — even one
+// alone is above 5% of the test model's 100k window, so they are deferred
+// behind search_tools.
+const mcpCalls: string[] = []
+const heavyClient = {
+  getServerCapabilities: () => ({}),
+  callTool: async (request: { name: string }) => {
+    mcpCalls.push(request.name)
+    return { content: [{ type: "text", text: `ran ${request.name}` }] }
+  },
+} as unknown as MCP.McpTool["client"]
+const heavyTool = (name: string): MCP.McpTool => ({
+  def: {
+    name,
+    description: `${name}: ${"x".repeat(25_000)}`,
+    inputSchema: { type: "object", properties: { q: { type: "string" } } },
+  } as MCP.McpTool["def"],
+  client: heavyClient,
+})
+const withHeavyMcp = testEffect(
+  makeHttp({
+    mcp: {
+      clients: { heavy: heavyClient },
+      tools: { heavy_lookup: heavyTool("lookup"), heavy_other: heavyTool("other") },
+    },
+  }),
+)
+
+withHeavyMcp.instance("loop defers heavy MCP tools behind search_tools and loads them on demand", () =>
+  Effect.gen(function* () {
+    mcpCalls.length = 0
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const session = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    yield* prompt.prompt({
+      sessionID: session.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* llm.tool("search_tools", { query: "select:heavy_lookup" })
+    yield* llm.tool("heavy_lookup", { q: "a" })
+    // Called without loading it first: the call becomes a search for it.
+    yield* llm.tool("heavy_other", { q: "guessed" })
+    yield* llm.text("done")
+
+    yield* prompt.loop({ sessionID: session.id })
+
+    const inputs = yield* llm.inputs
+    expect(inputs).toHaveLength(4)
+    const toolNames = (input: Record<string, unknown>) =>
+      ((input.tools ?? []) as Array<{ function: { name: string } }>).map((item) => item.function.name)
+    expect(toolNames(inputs[0])).toContain("search_tools")
+    expect(toolNames(inputs[0])).not.toContain("heavy_lookup")
+    expect(toolNames(inputs[0])).not.toContain("heavy_other")
+    expect(JSON.stringify(inputs[0].messages)).toContain("MCP server heavy: heavy_lookup, heavy_other")
+    expect(toolNames(inputs[1])).toContain("heavy_lookup")
+    expect(toolNames(inputs[1])).not.toContain("heavy_other")
+    expect(toolNames(inputs[3])).toContain("heavy_other")
+    expect(JSON.stringify(inputs[3].messages)).toContain("The call to heavy_other did not run")
+
+    // Only the loaded tool reached the server; the guessed call never did.
+    expect(mcpCalls).toEqual(["lookup"])
+    const parts = (yield* sessions.messages({ sessionID: session.id })).flatMap((msg) => msg.parts)
+    const tools = parts.filter((part): part is SessionV1.ToolPart => part.type === "tool")
+    expect(tools.map((part) => [part.tool, part.state.status])).toEqual([
+      ["search_tools", "completed"],
+      ["heavy_lookup", "completed"],
+      ["search_tools", "completed"],
+    ])
+    expect(tools[2].state.input).toEqual({ query: "select:heavy_other", rewritten_from: "heavy_other" })
+  }),
+)
+
+withHeavyMcp.instance("a sub-agent narrowed by a catch-all deny still loads the deferred tools it is allowed", () =>
+  Effect.gen(function* () {
+    mcpCalls.length = 0
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    // What ARPOS writes for a desk sub-agent with an allow-list (`narrowPermission`).
+    const session = yield* sessions.create({
+      title: "Pinned",
+      permission: [
+        { permission: "*", pattern: "*", action: "deny" },
+        { permission: "heavy_lookup", pattern: "*", action: "allow" },
+      ],
+    })
+    yield* prompt.prompt({
+      sessionID: session.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* llm.tool("search_tools", { query: "select:heavy_lookup" })
+    yield* llm.tool("heavy_lookup", { q: "a" })
+    yield* llm.text("done")
+
+    yield* prompt.loop({ sessionID: session.id })
+
+    const inputs = yield* llm.inputs
+    expect(inputs).toHaveLength(3)
+    const toolNames = (input: Record<string, unknown>) =>
+      ((input.tools ?? []) as Array<{ function: { name: string } }>).map((item) => item.function.name)
+    expect(toolNames(inputs[0])).toEqual(["search_tools"])
+    expect(JSON.stringify(inputs[0].messages)).toContain("MCP server heavy: heavy_lookup")
+    expect(JSON.stringify(inputs).includes("heavy_other")).toBe(false)
+    // Its only allowed tool is loaded — nothing left to defer, so no search either.
+    expect(toolNames(inputs[1])).toEqual(["heavy_lookup"])
+    expect(mcpCalls).toEqual(["lookup"])
   }),
 )
 

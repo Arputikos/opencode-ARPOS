@@ -22,6 +22,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Permission } from "@/permission"
 import { LLMAISDK } from "@/session/llm/ai-sdk"
 import { LLMRequestPrep } from "@/session/llm/request"
+import { ToolSearch } from "@/session/tool-search"
 import { createStructuredOutputTool } from "@/session/prompt"
 import { Session as SessionNs } from "@/session/session"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -1330,6 +1331,95 @@ describe("session.llm.stream", () => {
   )
 
   it.instance(
+    "rewrites a call of a deferred tool into search_tools select",
+    () =>
+      Effect.gen(function* () {
+        const fixture = loadFixture(vivgridFixture.providerID, vivgridFixture.modelID)
+        const call = (index: number, id: string, name: string) => ({
+          id: "chatcmpl-1",
+          object: "chat.completion.chunk",
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index, id, type: "function", function: { name, arguments: '{"key":"A-1"}' } }],
+              },
+            },
+          ],
+        })
+        waitRequest(
+          "/chat/completions",
+          createEventResponse(
+            [
+              call(0, "call-deferred", "JIRA_getIssue"),
+              call(1, "call-unknown", "nope"),
+              {
+                id: "chatcmpl-1",
+                object: "chat.completion.chunk",
+                choices: [{ delta: {}, finish_reason: "tool_calls" }],
+              },
+            ],
+            true,
+          ),
+        )
+
+        const resolved = yield* Provider.use.getModel(
+          ProviderV2.ID.make(vivgridFixture.providerID),
+          ModelV2.ID.make(fixture.model.id),
+        )
+        const sessionID = SessionID.make("session-test-deferred-call")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const executed: Record<string, unknown> = {}
+        const spy = (name: string) =>
+          tool({
+            description: name,
+            inputSchema: z.object({}).passthrough(),
+            execute: async (args) => {
+              executed[name] = args
+              return { output: "" }
+            },
+          })
+
+        yield* drain({
+          user: {
+            id: MessageID.make("msg_user-deferred-call"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderV2.ID.make(vivgridFixture.providerID), modelID: resolved.id },
+          } satisfies SessionV1.User,
+          sessionID,
+          model: resolved,
+          agent,
+          system: [],
+          messages: [{ role: "user", content: "Get issue A-1" }],
+          tools: { search_tools: spy("search_tools"), invalid: spy("invalid") },
+          deferredTools: ["jira_getIssue"],
+        })
+
+        // The deferred call never runs with its guessed arguments: it becomes a search for that tool.
+        expect(executed.search_tools).toEqual({ query: "select:jira_getIssue", rewritten_from: "JIRA_getIssue" })
+        // A name that is not deferred either still goes to `invalid`.
+        expect(executed.invalid).toMatchObject({ tool: "nope" })
+      }),
+    {
+      config: () => ({
+        enabled_providers: [vivgridFixture.providerID],
+        provider: {
+          [vivgridFixture.providerID]: {
+            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
     "sends responses API payload for OpenAI models",
     () =>
       Effect.gen(function* () {
@@ -1419,6 +1509,83 @@ describe("session.llm.stream", () => {
 
         const maxTokens = body.max_output_tokens as number | undefined
         expect(maxTokens).toBe(undefined) // match codex cli behavior
+      }),
+    { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
+  )
+
+  // ARPOS (patch 27): `@ai-sdk/openai` replays a call named `tool_search` as OpenAI's native
+  // tool search, without its arguments — OpenAI answers 400. The engine's search must not be one.
+  it.instance(
+    "replays the engine's search tool call to OpenAI as a function call with its arguments",
+    () =>
+      Effect.gen(function* () {
+        const model = loadFixture("openai", "gpt-5.2").model
+        const request = waitRequest(
+          "/responses",
+          createEventResponse(
+            [
+              {
+                type: "response.completed",
+                response: { incomplete_details: null, usage: { input_tokens: 1, output_tokens: 1 } },
+              },
+            ],
+            true,
+          ),
+        )
+        const resolved = yield* Provider.use.getModel(ProviderV2.ID.openai, ModelV2.ID.make(model.id))
+        const sessionID = SessionID.make("session-test-search-tools-replay")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const input = { query: "select:jira_getIssue" }
+
+        yield* drain({
+          user: {
+            id: MessageID.make("msg_user-search-tools-replay"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderV2.ID.make("openai"), modelID: resolved.id },
+          } satisfies SessionV1.User,
+          sessionID,
+          model: resolved,
+          agent,
+          system: [],
+          messages: [
+            { role: "user", content: "Get issue A-1" },
+            {
+              role: "assistant",
+              content: [{ type: "tool-call", toolCallId: "call-search", toolName: ToolSearch.NAME, input }],
+            },
+            {
+              role: "tool",
+              content: [
+                {
+                  type: "tool-result",
+                  toolCallId: "call-search",
+                  toolName: ToolSearch.NAME,
+                  output: { type: "text", value: "loaded" },
+                },
+              ],
+            },
+          ],
+          tools: {
+            [ToolSearch.NAME]: tool({
+              description: "Load deferred tools",
+              inputSchema: z.object({ query: z.string() }),
+              execute: async () => ({ output: "" }),
+            }),
+          },
+        })
+
+        const items = (yield* Effect.promise(() => request)).body.input as Array<Record<string, unknown>>
+        expect(items.find((item) => item.call_id === "call-search" && item.type !== "function_call_output")).toEqual(
+          expect.objectContaining({ type: "function_call", name: ToolSearch.NAME, arguments: JSON.stringify(input) }),
+        )
       }),
     { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
   )

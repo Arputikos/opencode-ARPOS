@@ -32,6 +32,7 @@ import { SessionSummary } from "./summary"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { SessionProcessor } from "./processor"
 import { RequestFootprint } from "./request-footprint"
+import { ToolSearch } from "./tool-search"
 import { Tool } from "@/tool/tool"
 import { Permission } from "@/permission"
 import { Wildcard } from "@opencode-ai/core/util/wildcard"
@@ -1743,6 +1744,7 @@ const layer = Layer.effect(
             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
             const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
             const promptOps = yield* ops()
+            const cfg = yield* config.get()
 
             const tools = yield* SessionTools.resolve({
               agent,
@@ -1792,6 +1794,28 @@ const layer = Layer.effect(
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
 
+            // ARPOS: above the threshold, plugin and MCP tools are held back
+            // behind search_tools (patch 27). Here, not in SessionTools.resolve:
+            // resumeOrphanTools must be able to run any tool.
+            const { tools: sent, deferred } = yield* Effect.promise(() =>
+              ToolSearch.partition({
+                tools: LLMRequestPrep.resolveTools({ tools, agent, permission: session.permission, user: lastUser }),
+                messages: msgs,
+                model,
+                alwaysLoad: cfg.experimental?.tool_search?.always_load ?? [],
+                deferrable: SessionTools.deferrable,
+                serverOf: SessionTools.serverOf,
+              }),
+            )
+            const deferredNames = Object.keys(deferred)
+            if (deferredNames.length > 0) {
+              // A plugin or MCP tool keyed `search_tools` gives way to the engine's search.
+              const { [ToolSearch.NAME]: displaced, ...loaded } = sent
+              const shadowed = displaced && ToolSearch.originOf(SessionTools.serverOf(displaced))
+              sent[ToolSearch.NAME] = ToolSearch.createTool({ deferred, loaded, model, shadowed })
+              system.push(ToolSearch.systemBlock(deferred, shadowed))
+            }
+
             // ARPOS: measure the request before sending it — the same system
             // prompt and tool set the request carries. One the model cannot
             // accept is not sent: excess in the conversation → compact (what a
@@ -1803,7 +1827,7 @@ const layer = Layer.effect(
                 model,
                 system: [LLMRequestPrep.baseSystem({ agent, model, system, user: lastUser })],
                 messages: modelMsgs,
-                tools: LLMRequestPrep.resolveTools({ tools, agent, permission: session.permission, user: lastUser }),
+                tools: sent,
                 serverOf: SessionTools.serverOf,
               }),
             )
@@ -1841,7 +1865,8 @@ const layer = Layer.effect(
                 ...modelMsgs,
                 ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : []),
               ],
-              tools,
+              tools: sent,
+              deferredTools: deferredNames,
               model,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
             })

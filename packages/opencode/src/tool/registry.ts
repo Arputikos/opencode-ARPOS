@@ -64,6 +64,16 @@ export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false
   )
 }
 
+// ARPOS: plugin tools (the whole ARPOS toolset among them) and `.opencode/tool`
+// files, as opposed to the engine's own — the tools `search_tools` may defer.
+// `all()`/`tools()` hand out flat `Tool.Def[]`, so the origin rides along here.
+const customTools = new WeakSet<Tool.Def>()
+
+/** ARPOS: the tool came from a plugin or a `.opencode/tool` file, not from the engine. */
+export function isCustom(def: Tool.Def) {
+  return customTools.has(def)
+}
+
 type TaskDef = Tool.InferDef<typeof TaskTool>
 type ReadDef = Tool.InferDef<typeof ReadTool>
 
@@ -135,7 +145,7 @@ const layer = Layer.effect(
           const parameters = zodParams
             ? Schema.declare<unknown>((u): u is unknown => zodParams.safeParse(u).success)
             : Schema.Unknown
-          return {
+          const result: Tool.Def = {
             id,
             parameters,
             jsonSchema,
@@ -178,6 +188,8 @@ const layer = Layer.effect(
                 }),
               ),
           }
+          customTools.add(result)
+          return result
         }
 
         const dirs = yield* config.directories()
@@ -320,7 +332,7 @@ const layer = Layer.effect(
             output.parameters === tool.parameters || output.jsonSchema !== tool.jsonSchema
               ? output.jsonSchema
               : undefined
-          return {
+          const result: Tool.Def = {
             id: tool.id,
             description: [
               output.description,
@@ -334,6 +346,8 @@ const layer = Layer.effect(
             execute: tool.execute,
             formatValidationError: tool.formatValidationError,
           }
+          if (customTools.has(tool)) customTools.add(result)
+          return result
         }),
         { concurrency: "unbounded" },
       )

@@ -185,6 +185,13 @@ export const Info = Schema.Struct({
       policies: Schema.optional(Schema.mutable(Schema.Array(ConfigExperimental.Policy))).annotate({
         description: "Policy statements applied to supported resources, such as provider access",
       }),
+      tool_search: Schema.optional(
+        Schema.Struct({
+          always_load: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+            description: "Tool name patterns (wildcards, case-insensitive) that are never deferred behind search_tools",
+          }),
+        }),
+      ),
     }),
   ),
 }).annotate({ identifier: "Config" })

@@ -29,6 +29,7 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import { ToolSearch } from "./tool-search"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
@@ -43,6 +44,8 @@ export type StreamInput = {
   messages: ModelMessage[]
   small?: boolean
   tools: Record<string, Tool>
+  /** ARPOS: tools held back behind `search_tools` this step — a call to one becomes a search for it. */
+  deferredTools?: string[]
   retries?: number
   toolChoice?: "auto" | "required" | "none"
 }
@@ -298,6 +301,17 @@ const live: Layer.Layer<
               return {
                 ...failed.toolCall,
                 toolName: lower,
+              }
+            }
+            // ARPOS: a deferred tool called without loading it first does not
+            // run (its arguments were guessed without a schema) — the call
+            // becomes the search that loads it (patch 27).
+            const deferred = input.deferredTools?.find((name) => name.toLowerCase() === lower)
+            if (deferred && prepared.tools[ToolSearch.NAME]) {
+              return {
+                ...failed.toolCall,
+                input: JSON.stringify({ query: `select:${deferred}`, rewritten_from: failed.toolCall.toolName }),
+                toolName: ToolSearch.NAME,
               }
             }
             return {

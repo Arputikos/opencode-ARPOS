@@ -1,0 +1,10 @@
+Loads deferred tools so you can call them.
+
+Some of your tools are deferred: the system prompt lists only their names (under "Deferred tools"), without their definitions. A deferred tool cannot be called until it is loaded with this tool. A loaded tool can be called from your next step on and stays loaded for the rest of the session.
+
+Query forms:
+- "select:name1,name2" — load these exact tools by name. Use it when you already know the names from the list.
+- Keywords, e.g. "jira issue comment" — find tools by name and description; returns the best matches (max_results, default 5).
+- "+word" — require the word in the tool name, e.g. "+browser click".
+
+The result gives each loaded tool's name, description and parameter schema.

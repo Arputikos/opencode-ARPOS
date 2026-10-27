@@ -14,6 +14,7 @@ import { Effect, Record } from "effect"
 import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
 import type { Plugin } from "@/plugin"
 import { mergeDeep } from "remeda"
+import { ToolSearch } from "../tool-search"
 
 const USER_AGENT = `opencode/${InstallationVersion}`
 
@@ -224,12 +225,22 @@ export function baseSystem(input: Pick<PrepareInput, "agent" | "model" | "system
     .join("\n")
 }
 
+/**
+ * The tools the agent may use. ARPOS: the engine's `search_tools` is exempt —
+ * it is only there when tools are deferred, it searches nothing but this
+ * filtered set, and a catch-all deny (a sub-agent's allow-list) would otherwise
+ * strand every deferred tool the agent is allowed to use. Recognised by
+ * identity: a plugin or MCP tool keyed `search_tools` is filtered like any other.
+ */
 export function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission" | "user">) {
   const disabled = Permission.disabled(
     Object.keys(input.tools),
     Permission.merge(input.agent.permission, input.permission ?? []),
   )
-  return Record.filter(input.tools, (_, k) => input.user.tools?.[k] !== false && !disabled.has(k))
+  return Record.filter(
+    input.tools,
+    (tool, k) => ToolSearch.isSearchTool(tool) || (input.user.tools?.[k] !== false && !disabled.has(k)),
+  )
 }
 
 export function hasToolCalls(messages: ModelMessage[]): boolean {

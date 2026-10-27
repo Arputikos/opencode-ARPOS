@@ -49,6 +49,15 @@ export function serverOf(tool: AITool): string | undefined {
   return toolServers.get(tool)
 }
 
+// ARPOS: the tools `search_tools` may hold back — plugin tools (ARPOS among
+// them) and MCP tools; never the engine's own or the MCP resource tools.
+const deferrableTools = new WeakSet<AITool>()
+
+/** ARPOS: the tool from `resolve` may be deferred behind `search_tools`. */
+export function deferrable(tool: AITool) {
+  return deferrableTools.has(tool)
+}
+
 export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
   model: Provider.Model
@@ -115,7 +124,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     permission: input.session.permission,
   })) {
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
-    tools[item.id] = tool({
+    const built = (tools[item.id] = tool({
       description: item.description,
       inputSchema: jsonSchema(schema),
       execute(args, options) {
@@ -150,7 +159,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           }),
         )
       },
-    })
+    }))
+    if (ToolRegistry.isCustom(item)) deferrableTools.add(built)
   }
 
   const clients = yield* mcp.clients()
@@ -510,6 +520,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         }),
       )
     tools[key] = item
+    deferrableTools.add(item)
     const server = Object.keys(clients).find((name) => clients[name] === entry.client)
     if (server !== undefined) toolServers.set(item, server)
   }

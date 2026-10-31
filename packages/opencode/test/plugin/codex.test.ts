@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 import { createServer, type IncomingMessage } from "node:http"
 import { type AddressInfo } from "node:net"
 import { WebSocketServer } from "ws"
@@ -291,6 +291,7 @@ describe("plugin.codex", () => {
         ...Object.fromEntries(
           [
             "gpt-5.4",
+            "gpt-5.4-mini",
             "gpt-5.5",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
@@ -319,7 +320,8 @@ describe("plugin.codex", () => {
 
     const models = await hooks.provider!.models!(provider as never, { auth: { type: "oauth" } } as never)
 
-    expect(models["gpt-5.4"]?.limit).toEqual(limit)
+    expect(models["gpt-5.4"]).toBeUndefined()
+    expect(models["gpt-5.4-mini"]).toBeUndefined()
     expect(models["gpt-5.5"]?.limit).toEqual({ context: 400_000, input: 272_000, output: 128_000 })
     expect(models["gpt-5.6-sol"]?.limit).toEqual({ context: 400_000, input: 272_000, output: 128_000 })
     expect(models["gpt-5.6-terra"]?.limit).toEqual({ context: 400_000, input: 272_000, output: 128_000 })
@@ -346,6 +348,10 @@ describe("plugin.codex", () => {
     ["gpt-5.10-astra", true],
     ["gpt-5.40", true],
     ["gpt-5", false],
+    ["gpt-5.4", false],
+    ["gpt-5.4-mini", false],
+    ["gpt-5.5", true],
+    ["gpt-5.3-codex-spark", true],
     ["gpt-5.4-astra", false],
     ["gpt-5.04-astra", false],
     ["gpt-4.1", false],
@@ -367,6 +373,104 @@ describe("plugin.codex", () => {
     const models = await hooks.provider!.models!(provider as never, { auth: { type: "oauth" } } as never)
 
     expect(Object.keys(models)).toEqual(allowed ? [id] : [])
+  })
+
+  test("provider.models takes the account's list from the Codex backend", async () => {
+    const requests: Array<{
+      path: string
+      clientVersion: string | null
+      accountId: string | null
+      auth: string | null
+    }> = []
+    using server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url)
+        requests.push({
+          path: url.pathname,
+          clientVersion: url.searchParams.get("client_version"),
+          accountId: request.headers.get("ChatGPT-Account-Id"),
+          auth: request.headers.get("authorization"),
+        })
+        return Response.json({
+          models: [
+            { slug: "gpt-6.1-sol", visibility: "list", context_window: 500_000, max_context_window: 1_000_000 },
+            { slug: "gpt-5.6-luna", visibility: "list", context_window: 272_000 },
+            { slug: "gpt-6-astra", visibility: "list" },
+            { slug: "gpt-reserve", visibility: "hide", context_window: 272_000 },
+          ],
+        })
+      },
+    })
+    const hooks = await CodexAuthPlugin({} as never, {
+      codexModelsEndpoint: new URL("/backend-api/codex/models", server.url).toString(),
+    })
+    const limit = { context: 1_050_000, input: 922_000, output: 128_000 }
+    const provider = {
+      models: Object.fromEntries(
+        ["gpt-5.4-mini", "gpt-5.5", "gpt-6.1-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-reserve"].map((id) => [
+          id,
+          { id, api: { id }, limit, cost: { input: 1, output: 2 }, options: {} },
+        ]),
+      ),
+    }
+
+    const models = await hooks.provider!.models!(
+      provider as never,
+      {
+        auth: { type: "oauth", access: "access-token", refresh: "r", expires: Date.now() + 60_000, accountId: "acc-1" },
+      } as never,
+    )
+
+    expect(Object.keys(models).sort()).toEqual(["gpt-5.6-luna", "gpt-6-astra", "gpt-6.1-sol"])
+    expect(models["gpt-6.1-sol"]?.limit).toEqual({ context: 628_000, input: 500_000, output: 128_000 })
+    expect(models["gpt-5.6-luna"]?.limit).toEqual({ context: 400_000, input: 272_000, output: 128_000 })
+    expect(models["gpt-6-astra"]?.limit).toEqual({ context: 400_000, input: 272_000, output: 128_000 })
+    expect(models["gpt-6.1-sol"]?.cost).toEqual({ input: 0, output: 0, cache: { read: 0, write: 0 } })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({
+      path: "/backend-api/codex/models",
+      accountId: "acc-1",
+      auth: "Bearer access-token",
+    })
+    expect(requests[0]?.clientVersion).toMatch(/^\d+\.\d+\.\d+$/)
+
+    expect(await hooks.provider!.models!(provider as never, { auth: { type: "api", key: "sk" } } as never)).toBe(
+      provider.models as never,
+    )
+    expect(requests).toHaveLength(1)
+  })
+
+  test.each([
+    ["HTTP 500", () => new Response("boom", { status: 500 })],
+    ["HTTP 401", () => new Response("no", { status: 401 })],
+    ["unexpected response", () => Response.json({ data: [] })],
+    ["unexpected response", () => Response.json({ models: [{ id: "gpt-6-sol" }] })],
+    ["timeout", () => new Promise<Response>(() => {})],
+  ])("falls back to the version rule when the backend fails (%s)", async (reason, respond) => {
+    using server = Bun.serve({ port: 0, fetch: respond })
+    await expectVersionRuleFallback(
+      reason,
+      { type: "oauth", access: "access-token", refresh: "r", expires: Date.now() + 60_000 },
+      new URL("/backend-api/codex/models", server.url).toString(),
+    )
+  })
+
+  test("falls back to the version rule without asking the backend when the token has expired", async () => {
+    let requests = 0
+    using server = Bun.serve({
+      port: 0,
+      fetch() {
+        requests += 1
+        return Response.json({ models: [] })
+      },
+    })
+    await expectVersionRuleFallback(
+      "token expired",
+      { type: "oauth", access: "access-token", refresh: "r", expires: Date.now() - 1 },
+      new URL("/backend-api/codex/models", server.url).toString(),
+    )
+    expect(requests).toBe(0)
   })
 
   test("deduplicates concurrent Codex token refreshes", async () => {
@@ -470,6 +574,31 @@ describe("plugin.codex", () => {
     ])
   })
 })
+
+async function expectVersionRuleFallback(reason: string, auth: object, codexModelsEndpoint: string) {
+  const warn = spyOn(console, "warn").mockImplementation(() => {})
+  try {
+    const hooks = await CodexAuthPlugin({} as never, { codexModelsEndpoint })
+    const provider = {
+      models: Object.fromEntries(
+        ["gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna"].map((id) => [
+          id,
+          { id, api: { id }, limit: { context: 1, output: 1 }, cost: {}, options: {} },
+        ]),
+      ),
+    }
+
+    const models = await hooks.provider!.models!(provider as never, { auth } as never)
+
+    expect(Object.keys(models).sort()).toEqual(["gpt-5.5", "gpt-5.6-luna"])
+    expect(models["gpt-5.6-luna"]?.limit).toEqual({ context: 400_000, input: 272_000, output: 128_000 })
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0]?.[0])).toContain(`(${reason})`)
+    expect(String(warn.mock.calls[0]?.[0])).not.toContain("access-token")
+  } finally {
+    warn.mockRestore()
+  }
+}
 
 async function waitFor(predicate: () => boolean) {
   const started = Date.now()

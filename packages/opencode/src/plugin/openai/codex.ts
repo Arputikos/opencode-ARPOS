@@ -6,13 +6,20 @@ import { setTimeout as sleep } from "node:timers/promises"
 import { createServer } from "http"
 import { OpenAIWebSocketPool } from "./ws-pool"
 import { OauthCallbackPage } from "@opencode-ai/core/oauth/page"
+import opencodePackage from "../../../package.json"
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 const ISSUER = "https://auth.openai.com"
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
+const CODEX_MODELS_ENDPOINT = "https://chatgpt.com/backend-api/codex/models"
+const CODEX_MODELS_TIMEOUT_MS = 3_000
+const CODEX_OUTPUT_LIMIT = 128_000
+// ARPOS: OpenCode runs without a release build here, so `InstallationVersion` reads "local",
+// which the Codex models endpoint refuses (HTTP 400); the package version is the real one.
+const CODEX_CLIENT_VERSION = opencodePackage.version
 const OAUTH_PORT = 1455
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
-const ALLOWED_MODELS = new Set(["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-6-sol", "gpt-6-luna"])
+const ALLOWED_MODELS = new Set(["gpt-5.5", "gpt-5.3-codex-spark", "gpt-6-sol", "gpt-6-luna"])
 const DISALLOWED_MODELS = new Set(["gpt-5.5-pro"])
 
 /** `gpt-5.5` and every later generation (`gpt-5.10`, `gpt-6-*`), compared numerically. */
@@ -22,6 +29,50 @@ function isGpt55OrLater(id: string) {
   const major = Number(match[1])
   const minor = Number(match[2] ?? 0)
   return major > 5 || (major === 5 && minor > 4)
+}
+
+/**
+ * ARPOS: the models the signed-in ChatGPT account may use (it depends on the plan), keyed by
+ * slug — the list the Codex CLI itself reads. `undefined` when it cannot be read; the caller
+ * then falls back to the version rule.
+ */
+async function fetchCodexModels(
+  auth: { access?: string; expires?: number; accountId?: string },
+  endpoint: string,
+): Promise<Map<string, { contextWindow?: number }> | undefined> {
+  const fail = (reason: string) => {
+    console.warn(`[codex] account model list unavailable (${reason}); using the built-in model rule`)
+    return undefined
+  }
+  if (!auth.access || !auth.expires || auth.expires < Date.now()) return fail("token expired")
+  const url = new URL(endpoint)
+  url.searchParams.set("client_version", CODEX_CLIENT_VERSION)
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${auth.access}`,
+    originator: "opencode",
+    "User-Agent": `opencode/${InstallationVersion} (${os.platform()} ${os.release()}; ${os.arch()})`,
+  }
+  if (auth.accountId) headers["ChatGPT-Account-Id"] = auth.accountId
+  let body: unknown
+  try {
+    const response = await fetch(url, { headers, signal: AbortSignal.timeout(CODEX_MODELS_TIMEOUT_MS) })
+    if (!response.ok) return fail(`HTTP ${response.status}`)
+    body = await response.json()
+  } catch (error) {
+    return fail(error instanceof Error && error.name === "TimeoutError" ? "timeout" : "request failed")
+  }
+  const models = (body as { models?: unknown } | null)?.models
+  if (!Array.isArray(models)) return fail("unexpected response")
+  const visible = new Map<string, { contextWindow?: number }>()
+  for (const model of models) {
+    if (typeof model?.slug !== "string") return fail("unexpected response")
+    if (model.visibility !== "list") continue
+    const contextWindow = model.context_window
+    visible.set(model.slug, {
+      contextWindow: typeof contextWindow === "number" && contextWindow > 0 ? contextWindow : undefined,
+    })
+  }
+  return visible
 }
 
 interface PkceCodes {
@@ -120,6 +171,7 @@ interface TokenResponse {
 interface CodexAuthPluginOptions {
   issuer?: string
   codexApiEndpoint?: string
+  codexModelsEndpoint?: string
   experimentalWebSockets?: boolean
 }
 
@@ -282,6 +334,7 @@ function waitForOAuthCallback(pkce: PkceCodes, state: string): Promise<TokenResp
 export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPluginOptions = {}): Promise<Hooks> {
   const issuer = options.issuer ?? ISSUER
   const codexApiEndpoint = options.codexApiEndpoint ?? CODEX_API_ENDPOINT
+  const codexModelsEndpoint = options.codexModelsEndpoint ?? CODEX_MODELS_ENDPOINT
   let websocketFetchInstalled = false
   const websocketFetches: Array<ReturnType<typeof OpenAIWebSocketPool.createWebSocketFetch>> = []
 
@@ -299,15 +352,31 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
       async models(provider, ctx) {
         if (ctx.auth?.type !== "oauth") return provider.models
 
+        // ARPOS: the account's own list from the Codex backend is the source of truth — it
+        // follows OpenAI's launches and retirements and the account's plan, with each model's
+        // real context window. The version rule below is only the fallback when it cannot be read.
+        const live = await fetchCodexModels(ctx.auth, codexModelsEndpoint)
+        const available = (id: string) => {
+          if (live) return live.has(id)
+          if (ALLOWED_MODELS.has(id)) return true
+          if (DISALLOWED_MODELS.has(id)) return false
+          if (id === "gpt-5.6") return false
+          return isGpt55OrLater(id)
+        }
+        const codexLimit = (model: (typeof provider.models)[string]) => {
+          if (live) {
+            const input = live.get(model.api.id)?.contextWindow
+            if (input) return { context: input + CODEX_OUTPUT_LIMIT, input, output: CODEX_OUTPUT_LIMIT }
+          }
+          // models.dev lists the public API window (e.g. 1.05M for gpt-6-luna); Codex grants
+          // every generation from 5.5 on 400k/272k (codex-rs models.json).
+          if (live || isGpt55OrLater(model.id)) return { context: 400_000, input: 272_000, output: CODEX_OUTPUT_LIMIT }
+          return model.limit
+        }
+
         return Object.fromEntries(
           Object.entries(provider.models)
-            .filter(([, model]) => {
-              if (model.options.reasoningMode === "pro") return false
-              if (ALLOWED_MODELS.has(model.api.id)) return true
-              if (DISALLOWED_MODELS.has(model.api.id)) return false
-              if (model.api.id === "gpt-5.6") return false
-              return isGpt55OrLater(model.api.id)
-            })
+            .filter(([, model]) => model.options.reasoningMode !== "pro" && available(model.api.id))
             .map(([modelID, model]) => [
               modelID,
               {
@@ -317,16 +386,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
                   output: 0,
                   cache: { read: 0, write: 0 },
                 },
-                // ARPOS: models.dev lists the public API window (e.g. 1.05M for
-                // gpt-6-luna); Codex grants every generation from 5.5 on the same
-                // 400k/272k as gpt-5.6 (codex-rs models.json), gpt-6-* included.
-                limit: isGpt55OrLater(model.id)
-                  ? {
-                      context: 400_000,
-                      input: 272_000,
-                      output: 128_000,
-                    }
-                  : model.limit,
+                limit: codexLimit(model),
               },
             ]),
         )

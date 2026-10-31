@@ -206,7 +206,37 @@ function selectBedrockMantleLanguageModel(sdk: BundledSDK, modelID: string) {
   return sdk.responses?.(modelID) ?? sdk.languageModel(modelID)
 }
 
+/**
+ * ARPOS: behind the orchestrator's LLM proxy (`ARPOS_LLM_PROXY`) a Google Vertex server holds no
+ * Google credential — only a session placeholder as its auth entry's key. The proxy swaps it for
+ * a token it mints from the service account, so the engine sends the placeholder as its bearer
+ * instead of asking Google's default credentials (which the agent's machine does not have).
+ */
+function arposProxiedVertex(token: string) {
+  return {
+    autoload: true,
+    options: {
+      // Claude models (`@ai-sdk/google-vertex/anthropic`) take their bearer from here,
+      // OpenAI-compatible ones from `fetch`; Gemini models send the same key as `apiKey`.
+      generateAuthToken: async () => token,
+      fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const headers = new Headers(init?.headers)
+        headers.set("Authorization", `Bearer ${token}`)
+        return fetch(input, { ...init, headers })
+      },
+    },
+    async getModel(sdk: any, modelID: string) {
+      return sdk.languageModel(String(modelID).trim())
+    },
+  }
+}
+
 function custom(dep: CustomDep): Record<string, CustomLoader> {
+  const arposLlmProxyToken = Effect.fnUntraced(function* (providerID: string) {
+    if (!process.env.ARPOS_LLM_PROXY) return undefined
+    const auth = yield* dep.auth(providerID)
+    return auth?.type === "api" ? auth.key : undefined
+  })
   return {
     anthropic: () =>
       Effect.succeed({
@@ -542,6 +572,8 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         },
       }),
     "google-vertex": Effect.fnUntraced(function* (provider: Info) {
+      const proxyToken = yield* arposLlmProxyToken(provider.id)
+      if (proxyToken) return arposProxiedVertex(proxyToken)
       const env = yield* dep.env()
       // models.dev advertises GOOGLE_VERTEX_PROJECT for Vertex; keep the wider
       // Google Cloud project env names as fallbacks for existing ADC setups.
@@ -593,6 +625,8 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
       }
     }),
     "google-vertex-anthropic": Effect.fnUntraced(function* () {
+      const proxyToken = yield* arposLlmProxyToken("google-vertex-anthropic")
+      if (proxyToken) return arposProxiedVertex(proxyToken)
       const env = yield* dep.env()
       const project = env["GOOGLE_CLOUD_PROJECT"] ?? env["GCP_PROJECT"] ?? env["GCLOUD_PROJECT"]
       const location = env["GOOGLE_CLOUD_LOCATION"] ?? env["VERTEX_LOCATION"] ?? "global"

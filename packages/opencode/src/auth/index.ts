@@ -72,7 +72,9 @@ const layer = Layer.effect(
 
     const set = Effect.fn("Auth.set")(function* (key: string, info: Info) {
       const norm = key.replace(/\/+$/, "")
-      const data = yield* all()
+      // ARPOS: behind the orchestrator's LLM proxy the server holds exactly the one entry the
+      // orchestrator set — never a leftover of another provider from an earlier run.
+      const data: { [key: string]: Info } = process.env.ARPOS_LLM_PROXY ? {} : yield* all()
       if (norm !== key) delete data[key]
       delete data[norm + "/"]
       yield* fsys

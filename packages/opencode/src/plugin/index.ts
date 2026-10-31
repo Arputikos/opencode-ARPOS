@@ -75,6 +75,9 @@ function internalPlugins(flags: RuntimeFlags.Info): PluginInstance[] {
           enabled: flags.experimentalWebSockets,
           channel: "latest",
         }),
+        // ARPOS: ChatGPT traffic goes through the orchestrator's LLM proxy, which holds the real token.
+        codexApiEndpoint: process.env.ARPOS_CODEX_API_ENDPOINT || undefined,
+        codexModelsEndpoint: process.env.ARPOS_CODEX_MODELS_ENDPOINT || undefined,
       }),
     CopilotAuthPlugin,
     ModalPlugin,

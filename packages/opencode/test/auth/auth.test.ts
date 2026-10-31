@@ -72,4 +72,19 @@ describe("Auth", () => {
       expect(after["anthropic"]).toBeUndefined()
     }),
   )
+
+  it.instance("behind the ARPOS LLM proxy, set keeps only the entry it writes", () =>
+    Effect.gen(function* () {
+      const auth = yield* Auth.Service
+      yield* auth.set("openai", { type: "api", key: "sk-left-over" })
+      process.env.ARPOS_LLM_PROXY = "1"
+      try {
+        yield* auth.set("anthropic", { type: "api", key: "sk-placeholder" })
+      } finally {
+        delete process.env.ARPOS_LLM_PROXY
+      }
+      const data = yield* auth.all()
+      expect(Object.keys(data)).toEqual(["anthropic"])
+    }),
+  )
 })

@@ -1962,6 +1962,35 @@ it.instance("Google Vertex: keeps regional Gemini endpoints unchanged", () =>
   }),
 )
 
+const arposProxy = testEffect(providerLayer())
+
+arposProxy.instance(
+  "Google Vertex: behind the ARPOS LLM proxy sends the session placeholder as the bearer",
+  () =>
+    Effect.gen(function* () {
+      yield* setProcessEnv("ARPOS_LLM_PROXY", "1")
+      const auth = yield* Auth.Service
+      yield* auth.set("google-vertex", { type: "api", key: "sk-arposl_placeholder" })
+      const provider = yield* Provider.Service
+      const model = yield* provider.getModel(
+        ProviderV2.ID.make("google-vertex"),
+        ModelV2.ID.make("claude-sonnet-4-6@default"),
+      )
+      const language = (yield* provider.getLanguage(model)) as unknown as {
+        config: { baseURL: string; headers: () => Promise<Record<string, string>> }
+      }
+      expect(language.config.baseURL).toBe("http://127.0.0.1:9/api/plugin-llm/google-vertex")
+      const headers = yield* Effect.promise(() => language.config.headers())
+      expect(headers["Authorization"]).toBe("Bearer sk-arposl_placeholder")
+    }),
+  {
+    config: {
+      provider: { "google-vertex": { options: { baseURL: "http://127.0.0.1:9/api/plugin-llm/google-vertex" } } },
+    },
+  },
+  30_000,
+)
+
 it.instance("cloudflare-ai-gateway loads with env variables", () =>
   Effect.gen(function* () {
     yield* set("CLOUDFLARE_ACCOUNT_ID", "test-account")

@@ -294,6 +294,16 @@ export interface Hooks {
       system: string[]
     },
   ) => Promise<void>
+  /**
+   * ARPOS: every request to a model, just before it is sent — the conversation as the
+   * provider gets it (AI SDK `ModelMessage`s; the system prompt goes through
+   * `experimental.chat.system.transform`). The engine's own calls pass here too: the
+   * title, a compaction, a summary.
+   */
+  "experimental.chat.request.transform"?: (
+    input: { sessionID: string; agent: string; model: Model; small: boolean },
+    output: { messages: Array<{ role: string; content: unknown }> },
+  ) => Promise<void>
   "experimental.provider.small_model"?: (input: { provider: ProviderV2 }, output: { model?: ModelV2 }) => Promise<void>
   /**
    * Called before session compaction starts. Allows plugins to customize

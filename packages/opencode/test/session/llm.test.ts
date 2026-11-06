@@ -3,6 +3,7 @@ import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import path from "path"
+import { pathToFileURL } from "url"
 import { tool, type ModelMessage } from "ai"
 import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
 import { InstanceRef } from "../../src/effect/instance-ref"
@@ -870,6 +871,67 @@ describe("session.llm.stream", () => {
       },
     )
   })
+
+  // ARPOS (patch 29): one point every request passes — the engine's own calls (title, compaction) too.
+  it.instance(
+    "a request goes out as the request transform hook left its messages",
+    () =>
+      Effect.gen(function* () {
+        const fixture = loadFixture(vivgridFixture.providerID, vivgridFixture.modelID)
+        const request = waitRequest(
+          "/chat/completions",
+          new Response(createChatStream("A title"), { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+        )
+        const resolved = yield* Provider.use.getModel(
+          ProviderV2.ID.make(vivgridFixture.providerID),
+          ModelV2.ID.make(fixture.model.id),
+        )
+        const sessionID = SessionID.make("session-request-transform")
+        const agent = {
+          name: "title",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make("msg_user-request-transform"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderV2.ID.make(vivgridFixture.providerID), modelID: resolved.id },
+        } satisfies SessionV1.User
+
+        yield* drain({
+          user,
+          sessionID,
+          model: resolved,
+          agent,
+          small: true,
+          system: [],
+          messages: [
+            { role: "user", content: "Generate a title for this conversation:\n" },
+            { role: "user", content: [{ type: "text", text: "my password is s3cr3t-value" }] },
+          ],
+          tools: {},
+        })
+
+        const sent = JSON.stringify((yield* Effect.promise(() => request)).body)
+        expect(sent).not.toContain("s3cr3t-value")
+        expect(sent).toContain("my password is [REDACTED]")
+      }),
+    {
+      config: () => ({
+        enabled_providers: [vivgridFixture.providerID],
+        plugin: [pathToFileURL(path.join(import.meta.dir, "..", "fixture", "request-transform-plugin.ts")).href],
+        provider: {
+          [vivgridFixture.providerID]: {
+            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` },
+          },
+        },
+      }),
+    },
+  )
 
   it.instance(
     "sends temperature, tokens, and reasoning options for openai-compatible models",

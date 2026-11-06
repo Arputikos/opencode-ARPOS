@@ -91,9 +91,19 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   }
   if (isOpenaiOauth) options.instructions = system.join("\n")
 
+  // ARPOS: every request any part of the engine makes to a model passes here once — a
+  // turn, a sub-agent's, the title, a compaction, a summary — with the conversation as
+  // it goes out. The plugin's last look at it (known secrets out).
+  const conversation = { messages: [...input.messages] }
+  yield* input.plugin.trigger(
+    "experimental.chat.request.transform",
+    { sessionID: input.sessionID, agent: input.agent.name, model: input.model, small: input.small ?? false },
+    conversation,
+  )
+
   const messages =
     isOpenaiOauth || input.isWorkflow
-      ? input.messages
+      ? conversation.messages
       : [
           ...system.map(
             (x): ModelMessage => ({
@@ -101,7 +111,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
               content: x,
             }),
           ),
-          ...input.messages,
+          ...conversation.messages,
         ]
 
   const params = yield* input.plugin.trigger(

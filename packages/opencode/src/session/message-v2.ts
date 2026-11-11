@@ -168,6 +168,17 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
     attachment.mime.startsWith("image/") &&
     !["image/png", "image/jpeg", "image/webp"].includes(attachment.mime)
 
+  // OpenAI downscales tool-result images by default ("auto" = "high"); from GPT-5.4 on "original"
+  // keeps every pixel — the precision computer use and screenshots need (ARPOS patch 30).
+  const openaiImageDetail = iife(() => {
+    if (model.api.npm !== "@ai-sdk/openai") return undefined
+    const version = /gpt-(\d+)(?:\.(\d+))?/.exec(model.api.id.toLowerCase())
+    if (!version) return "high"
+    const major = Number(version[1])
+    const minor = Number(version[2] ?? 0)
+    return major > 5 || (major === 5 && minor >= 4) ? "original" : "high"
+  })
+
   const toModelOutput = (options: { toolCallId: string; input: unknown; output: unknown }) => {
     const output = options.output
     if (typeof output === "string") {
@@ -187,14 +198,21 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         type: "content",
         value: [
           ...(outputObject.text ? [{ type: "text", text: outputObject.text }] : []),
-          ...attachments.map((attachment) => ({
-            type: "media",
-            mediaType: attachment.mime,
-            data: iife(() => {
+          ...attachments.map((attachment) => {
+            const data = iife(() => {
               const commaIndex = attachment.url.indexOf(",")
               return commaIndex === -1 ? attachment.url : attachment.url.slice(commaIndex + 1)
-            }),
-          })),
+            })
+            if (openaiImageDetail && attachment.mime.startsWith("image/")) {
+              return {
+                type: "image-data",
+                mediaType: attachment.mime,
+                data,
+                providerOptions: { openai: { imageDetail: openaiImageDetail } },
+              }
+            }
+            return { type: "media", mediaType: attachment.mime, data }
+          }),
         ],
       }
     }

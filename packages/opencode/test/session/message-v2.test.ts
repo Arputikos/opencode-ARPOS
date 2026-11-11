@@ -402,7 +402,7 @@ describe("session.message-v2.toModelMessage", () => {
               type: "content",
               value: [
                 { type: "text", text: "ok" },
-                { type: "media", mediaType: "image/png", data: "Zm9v" },
+                { type: "image-data", mediaType: "image/png", data: "Zm9v", providerOptions: { openai: { imageDetail: "high" } } },
               ],
             },
             providerOptions: { openai: { tool: "meta" } },
@@ -410,6 +410,13 @@ describe("session.message-v2.toModelMessage", () => {
         ],
       },
     ])
+
+    // GPT-5.4 and later take tool-result images at their original resolution (ARPOS patch 30).
+    for (const [id, detail] of [["gpt-5.4", "original"], ["gpt-6-astra", "original"], ["gpt-5.2", "high"]] as const) {
+      const messages = await MessageV2.toModelMessages(input, { ...model, api: { ...model.api, id } })
+      const result = messages[2]?.content[0] as { output: { value: unknown[] } }
+      expect(result.output.value[1]).toStrictEqual({ type: "image-data", mediaType: "image/png", data: "Zm9v", providerOptions: { openai: { imageDetail: detail } } })
+    }
   })
 
   test("preserves jpeg tool-result media for anthropic models", async () => {
